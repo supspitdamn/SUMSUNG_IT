@@ -2,4 +2,4 @@
 Авторы:
     Пятков Дмитрий - supspitdamn
     Лемза Семен - hoomas
-    Панченко Даниил - UNKNOWN
+    Панченко Даниил - PapaCapitan
