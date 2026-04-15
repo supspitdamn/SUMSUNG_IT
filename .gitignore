@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# База данных (генерируется при запуске)
+DataBase.db
+
+# Тестовые данные
+test_data/
+test.py
+
+
+# IDE
+.vscode/
+.idea/
+
+# ОС
+Thumbs.db
+.DS_Store

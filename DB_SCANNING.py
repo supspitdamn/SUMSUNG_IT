@@ -227,7 +227,7 @@ def parsing(df: pd.DataFrame) -> None:
             try:
                 results = []
 
-                # аудиодорожка → whisper
+                # аудиодорожка whisper
                 with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
                     tmp_audio = tmp.name
                 subprocess.run([
@@ -248,7 +248,7 @@ def parsing(df: pd.DataFrame) -> None:
                         results.append(res["text"].strip())
                 os.unlink(tmp_audio)
 
-                # кадры → OCR
+                # кадры OCR
                 with tempfile.TemporaryDirectory() as tmpdir:
                     subprocess.run([
                         FFMPEG_PATH, "-i", path,
