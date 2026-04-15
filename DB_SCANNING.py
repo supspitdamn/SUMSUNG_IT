@@ -6,16 +6,13 @@ import fitz
 import docx
 from docx import Document
 import whisper # Для аудио формата
-import re
 import time
 import datetime
 
-audio_model = whisper.load_model("base")
-
 def is_file_accessible(path: str) -> bool:
     """
-    Проверяет реальную возможность чтения файла.
-    os.access часто врет в Windows, поэтому используем попытку открытия.
+    Проверяет реальную возможность чтения файла. Для этого пытаемся получить
+    право писать и читать файл
     """
     try:
         # Пытаемся открыть файл на чтение. 
@@ -27,11 +24,10 @@ def is_file_accessible(path: str) -> bool:
         return False
 
 def forming_table(root_dir: str = ".//") -> pd.DataFrame:
-
     """
-    ФУНКЦИЯ forming_table ПРИНИМАЕТ НА ВХОД ССЫЛКУ НА КОРНЕВУЮ ПАПКУ (УСЛОВНАЯ БАЗА ДАННЫХ) И ВОЗВРАЩАЕТ
-    ТАБЛИЦУ С МЕТАДАННЫМИ О КАЖДОМ ФАЙЛЕ (НАЗВАНИЕ, РАСШИРЕНИЕ, ПУТЬ). ТАКЖЕ СОЗДАЕТ ДОПОЛНИТЕЛЬНО КОЛОНКИ
-    ОЦЕНКИ ОПАСНОТИ, СОДЕРЖАНИЯ, КАТЕГОРИИ
+    функция forming_table принимает на вход ссылку на корневую папку (условная база данных) и возвращает
+    таблицу с метаданными о каждом файле (название, расширение, путь). также создает дополнительно колонки
+    оценки опасности, содержания, категории.
     """
 
     raw_data = []
@@ -79,19 +75,18 @@ def forming_table(root_dir: str = ".//") -> pd.DataFrame:
                     # ловим другие ошибки (файл удален в процессе поиска и т.д.)
                 df = pd.DataFrame(raw_data)
                 df['Содержание'] = "NO"
-                df['Категория'] = "Unkwown"
                 df['Рейтинг опасности'] = 0.0
                 df['Найденные ПДн'] = "NO"
+
     return df
 
 def parsing(df: pd.DataFrame) -> None:
-
     """
-    ФУНКЦИЯ PARSING ПРИНИМАЕТ НА ВХОД ТАБЛИЦУ В PANDAS И ВОЗВРАЩАЕТ ИЗМЕНЕННЫЙ ДАТАФРЕЙМ
-    В ФУНКЦИИ ПАРСИНГ ЕСТЬ ВЛОЖЕННАЯ СЛУЖЕБНАЯ ФУНКЦИЯ CHOOSE_ENGINE, ПРИНИМАЮЩАЯ
-    НА ВХОД СТРОКУ (РАСШИРЕНИЕ ФАЙЛА) И ВОЗВРАЩАЕТ В ВИДЕ СТРОКИ ТИП ИСПОЛЬЗУЕМОГО ПАРСЕРА
-    ЦИКЛ ИТЕРАТИВНО ПЕРЕБИРАЕТ СТРОКИ ТАБЛИЦЫ БЕРЕТ РАСШИРЕНИЕ И ССЫЛКУ НА ФАЙЛ, ОПРЕДЕЛЯЕТ 
-    ТИП ПАРСЕРА И ИЗВЛЕКАЕТ ТЕКСТ В СООТВЕТСТВУЮЩУЮ ЯЧЕЙКУ СОДЕРЖАНИЕ
+    функция parsing принимает на вход таблицу в pandas и возвращает измененный датафрейм.
+    в функции парсинг есть вложенная служебная функция choose_engine, принимающая
+    на вход строку (расширение файла) и возвращающая в виде строки тип используемого парсера.
+    цикл итеративно перебирает строки таблицы, берет расширение и ссылку на файл, определяет 
+    тип парсера и извлекает текст в соответствующую ячейку содержание.
     """
 
     def choose_engine(extension: str) -> str:
@@ -114,6 +109,8 @@ def parsing(df: pd.DataFrame) -> None:
         }
         return cases.get(extension, "skip")
     
+    audio_model = whisper.load_model("base")
+
     for idx, row in df.iterrows():
 
         path = row["Путь"]
@@ -179,12 +176,15 @@ def parsing(df: pd.DataFrame) -> None:
     
     return df
 
-def seek_danger(df: pd.Dataframe) -> pd.DataFrame:
+def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
     """
-    ФУНКЦИЯ seek_danger ПРИНИМАЕТ НА ВХОД ДАТАФРЕЙМ С ИЗВЛЕЧЕННЫМ ТЕКСТОМ
-    И ВОЗВРАЩАЕТ ДАТАФРЕЙМ С ИЗМЕНЕННОЙ КОЛОНКОЙ "Найденные ПДн". В ЭТУ КОЛОНКУ
-    ЗАПИСЫВАЕМ ВСЕ, ЧТО СОВПАЛО С КЛЮЧАМИ (СОГЛАСНО ФЗ.152).
+    функция seek_danger принимает на вход датафрейм с извлеченным текстом
+    и возвращает датафрейм с измененной колонкой "найденные пдн". в эту колонку
+    записываем все, что совпало с ключами (согласно фз №152).
+    все текстовые данные внутри функции переводятся в нижний регистр для
+    обеспечения точности сопоставления паттернов.
     """
+
     # Поиск подстроки в строке бессмысленен, так как заведомо неизвестен набор символов
     # Значит необходимо искать по паттернам (чтобы подстрока удовлетворила паттерну)
     # \d - цифра
@@ -222,13 +222,11 @@ def seek_danger(df: pd.Dataframe) -> pd.DataFrame:
 
         info = row["Содержание"].lower()
 
-
         # Тут Даня пиши свой код выявления ПДн. 
     
     return df
 
 def evaluate_violations(df: pd.DataFrame) -> pd.DataFrame:
-
     """
     Функция принимает на вход датафрейм и по колонке найденные ПДн 
     оценивает опасность файлов. Оценка будет производиться согласно словарю
@@ -237,23 +235,54 @@ def evaluate_violations(df: pd.DataFrame) -> pd.DataFrame:
     
     pass
 
-    
+def run_scanning(path: str)->pd.DataFrame:
 
-root_dir = ".//DataBase"
+    """
+    Функция для запуска полного сканнирования хранилища.
+    Все функции расставлены в порядке их необходимого применения.
+    В целом функции независимы, но это рекомендованный порядок
 
-df = forming_table(root_dir=root_dir) # Извлечение метаданных
+    """
+    start_time = time.time()
+    root_dir = path
 
-extracted_df = parsing(df) # Получаем датафрей с извлеченными файлами
+    # --- Шаг 1 ---
+    df = forming_table(root_dir=root_dir)
+    time_step1 = time.time()
+    print(f"Время извлечения метаданных: {round(time_step1 - start_time, 2)} сек.")
 
-found_dangers_df = seek_danger(df) # Получаем датафрейм с колонкой нарушений
+    # --- Шаг 2 ---
+    extracted_df = parsing(df) 
+    time_step2 = time.time()
+    print(f"Время парсинга информации: {round(time_step2 - time_step1, 2)} сек.")
 
-print(extracted_df["Содержание"].iloc[4])
+    # --- Шаг 3 ---
+    found_danger_df = seek_danger(extracted_df) 
+    time_step3 = time.time()
+    print(f"Время анализа по №152-ФЗ: {round(time_step3 - time_step2, 2)} сек.")
 
-print(extracted_df[["Имя файла", "Содержание"]])
+    # Итог
+    evaluated_df = evaluate_violations(found_danger_df)
+    time_step4 = time.time() - start_time
+    print(f"\nВремя оценки нарушений: {round(time_step4, 2)} сек.")
 
+    print(extracted_df)
 
+    try:
+        conn = sqlite3.connect("DataBase.db")
+        found_danger_df.to_sql("database", con = conn, if_exists = "replace")
 
+    except Exception as e:
 
+        print(f"Создать базу данных не удалось: {e}")
+
+    finally:
+
+        conn.close()
+
+    # Итог
+    total_time = time.time() - start_time
+    print(f"\nОБЩЕЕ ВРЕМЯ РАБОТЫ: {round(total_time, 2)} сек.")
 
 
 
