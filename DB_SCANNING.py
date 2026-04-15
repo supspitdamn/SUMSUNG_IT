@@ -14,6 +14,8 @@ import tempfile
 import subprocess
 import pytesseract
 from PIL import Image
+from concurrent.futures import ThreadPoolExecutor
+
 
 FFMPEG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg.exe")
 FFPROBE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffprobe.exe")
@@ -161,18 +163,20 @@ def parsing(df: pd.DataFrame) -> None:
 
                     # OCR fallback для сканов
                     if len(text.strip()) / max(len(doc), 1) < 50:
-                        ocr_parts = []
-                        for page in doc:
-                            pix = page.get_pixmap(matrix=fitz.Matrix(300/72, 300/72))
+
+                        def ocr_page(page):
+                            pix = page.get_pixmap(matrix=fitz.Matrix(150/72, 150/72))
                             img = Image.open(io.BytesIO(pix.tobytes("png")))
-                            t = pytesseract.image_to_string(img, lang="rus+eng")
-                            if t.strip():
-                                ocr_parts.append(t.strip())
-                        text = "\n\n".join(ocr_parts) if ocr_parts else ""
+                            return pytesseract.image_to_string(img, lang="rus+eng")
+
+                        with ThreadPoolExecutor(max_workers=4) as pool:
+                            results = list(pool.map(ocr_page, doc))
+                        text = "\n\n".join(r.strip() for r in results if r.strip())
 
                     df.at[idx, "Содержание"] = text.strip() if text.strip() else "ПУСТОЙ ПДФ"
             except Exception as e:
                 df.at[idx, "Содержание"] = f"Ошибка PDF: {e}"
+
         
         elif engine == "docx_engine":
             try:
