@@ -9,6 +9,20 @@ import whisper # Для аудио формата
 import time
 import datetime
 
+import io
+import tempfile
+import subprocess
+import pytesseract
+from PIL import Image
+
+FFMPEG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg.exe")
+FFPROBE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffprobe.exe")
+pytesseract.pytesseract.tesseract_cmd = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "tesseract", "tesseract.exe"
+)
+
+
+
 def is_file_accessible(path: str) -> bool:
     """
     Проверяет реальную возможность чтения файла. Для этого пытаемся получить
@@ -105,7 +119,22 @@ def parsing(df: pd.DataFrame) -> None:
 
             # Группа 4: Аудио (через Whisper)
             ".mp3": "whisper", ".wav": "whisper", ".m4a": "whisper",
-            ".flac": "whisper", ".ogg": "whisper"
+            ".flac": "whisper", ".ogg": "whisper",
+
+            # Группа 5: Изображения (через Tesseract OCR)
+            ".png": "image_ocr", ".jpg": "image_ocr", ".jpeg": "image_ocr",
+            ".bmp": "image_ocr", ".tiff": "image_ocr", ".tif": "image_ocr",
+            ".webp": "image_ocr",
+
+            # Группа 6: Видео (аудио Whisper + кадры Tesseract OCR)
+            ".mp4": "video_engine", ".avi": "video_engine",
+            ".mkv": "video_engine", ".mov": "video_engine",
+            ".webm": "video_engine", ".wmv": "video_engine",
+
+            # Группа 7: Таблицы (pandas - csv + openpyxl - xlsx + xlrd - xls)
+            ".csv": "table_engine", ".tsv": "table_engine",
+            ".xlsx": "table_engine", ".xls": "table_engine",
+
         }
         return cases.get(extension, "skip")
     
@@ -126,16 +155,24 @@ def parsing(df: pd.DataFrame) -> None:
         if engine == "pdf_engine":
             try:
                 with fitz.open(path) as doc:
-
                     text = ""
                     for page in doc:
-
                         text += page.get_text()
-                    df.at[idx, "Содержание"] = text.strip() if text else "ПУСТОЙ ПДФ"
 
+                    # OCR fallback для сканов
+                    if len(text.strip()) / max(len(doc), 1) < 50:
+                        ocr_parts = []
+                        for page in doc:
+                            pix = page.get_pixmap(matrix=fitz.Matrix(300/72, 300/72))
+                            img = Image.open(io.BytesIO(pix.tobytes("png")))
+                            t = pytesseract.image_to_string(img, lang="rus+eng")
+                            if t.strip():
+                                ocr_parts.append(t.strip())
+                        text = "\n\n".join(ocr_parts) if ocr_parts else ""
+
+                    df.at[idx, "Содержание"] = text.strip() if text.strip() else "ПУСТОЙ ПДФ"
             except Exception as e:
-                print(f"Ошибка в чтении файла PDF: {e}")
-                df.at[idx, "Содержание"] = f"Ошибка в чтении файла PDF: {e}"
+                df.at[idx, "Содержание"] = f"Ошибка PDF: {e}"
         
         elif engine == "docx_engine":
             try:
@@ -173,6 +210,109 @@ def parsing(df: pd.DataFrame) -> None:
 
                 print(f"Произошел сбой при извлечении аудиодорожки: {e}")
                 df.at[idx, "Содержание"] = f"Произошел сбой при извлечении аудиодорожки: {e}"
+        
+        # Изображения OCR
+        elif engine == "image_ocr":
+            try:
+                img = Image.open(path)
+                if img.mode not in ("L", "RGB"):
+                    img = img.convert("RGB")
+                text = pytesseract.image_to_string(img, lang="rus+eng")
+                df.at[idx, "Содержание"] = text.strip() if text.strip() else "OCR НЕ ИЗВЛЁК ТЕКСТ"
+            except Exception as e:
+                df.at[idx, "Содержание"] = f"Ошибка OCR: {e}"
+
+        # Видео OCR+Whisper
+        elif engine == "video_engine":
+            try:
+                results = []
+
+                # аудиодорожка → whisper
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                    tmp_audio = tmp.name
+                subprocess.run([
+                    FFMPEG_PATH, "-i", path,
+                    "-vn", "-acodec", "pcm_s16le",
+                    "-ar", "16000", "-ac", "1", "-y", tmp_audio
+                ], capture_output=True, timeout=120)
+
+                if os.path.getsize(tmp_audio) > 1000:
+                    audio = whisper.load_audio(tmp_audio)
+                    mel = whisper.log_mel_spectrogram(
+                        whisper.pad_or_trim(audio)
+                    ).to(audio_model.device)
+                    _, probs = audio_model.detect_language(mel)
+                    lang = max(probs, key=probs.get)
+                    res = audio_model.transcribe(tmp_audio, language=lang)
+                    if res["text"].strip():
+                        results.append(res["text"].strip())
+                os.unlink(tmp_audio)
+
+                # кадры → OCR
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    subprocess.run([
+                        FFMPEG_PATH, "-i", path,
+                        "-vf", "fps=1/10", "-q:v", "2", "-y",
+                        os.path.join(tmpdir, "f_%04d.jpg")
+                    ], capture_output=True, timeout=180)
+
+                    prev = ""
+                    for f in sorted(os.listdir(tmpdir)):
+                        if not f.endswith(".jpg"):
+                            continue
+                        img = Image.open(os.path.join(tmpdir, f))
+                        t = pytesseract.image_to_string(img, lang="rus+eng")
+                        if t.strip() and t.strip() != prev:
+                            results.append(t.strip())
+                            prev = t.strip()
+
+                df.at[idx, "Содержание"] = "\n".join(results) if results else "ВИДЕО: ТЕКСТ НЕ ИЗВЛЕЧЁН"
+            except Exception as e:
+                df.at[idx, "Содержание"] = f"Ошибка видео: {e}"
+
+        # Таблицы
+        elif engine == "table_engine":
+            try:
+                tbl_ext = os.path.splitext(path)[1].lower()
+
+                if tbl_ext == ".csv":
+                    for sep in [",", ";", "\t", "|"]:
+                        try:
+                            tdf = pd.read_csv(path, sep=sep, dtype=str, on_bad_lines="skip")
+                            if len(tdf.columns) > 1:
+                                break
+                        except Exception:
+                            continue
+                    else:
+                        tdf = pd.read_csv(path, dtype=str, on_bad_lines="skip")
+
+                elif tbl_ext == ".tsv":
+                    tdf = pd.read_csv(path, sep="\t", dtype=str, on_bad_lines="skip")
+
+                elif tbl_ext in (".xlsx", ".xls"):
+                    eng = "openpyxl" if tbl_ext == ".xlsx" else "xlrd"
+                    sheets = pd.read_excel(path, sheet_name=None, dtype=str, engine=eng)
+                    parts = []
+                    for sname, sdf in sheets.items():
+                        lines = [" ".join(str(c) for c in sdf.columns)]
+                        for _, r in sdf.iterrows():
+                            row_t = " ".join(str(v) for v in r.values if pd.notna(v))
+                            if row_t.strip():
+                                lines.append(row_t)
+                        parts.append(f"[{sname}]\n" + "\n".join(lines))
+                    df.at[idx, "Содержание"] = "\n\n".join(parts) if parts else "ПУСТАЯ ТАБЛИЦА"
+                    continue
+
+                lines = [" ".join(str(c) for c in tdf.columns)]
+                for _, r in tdf.iterrows():
+                    row_t = " ".join(str(v) for v in r.values if pd.notna(v))
+                    if row_t.strip():
+                        lines.append(row_t)
+                df.at[idx, "Содержание"] = "\n".join(lines) if lines else "ПУСТАЯ ТАБЛИЦА"
+
+            except Exception as e:
+                df.at[idx, "Содержание"] = f"Ошибка таблицы: {e}"
+
     
     return df
 
