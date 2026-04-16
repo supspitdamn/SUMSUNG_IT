@@ -22,6 +22,7 @@ async def lifespan(app: FastAPI):
     работы программы
     """
     print(f"Сервер запущен")
+    crud.clear_db()
     database.init_db()
     yield # приостанавливает выполнение функции до след. вызова
     print(f"Сервер отключен")
@@ -36,7 +37,7 @@ async def root():
 
 
 @app.post("/scan", response_model=schemas.ScanStatus)
-async def start_scan(path: str, background_tasks: BackgroundTasks) -> dict:
+async def start_scan(path: str, background_tasks: BackgroundTasks):
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="Такого пути нет")
     
@@ -82,7 +83,7 @@ async def get_results(task_id: str) -> dict:
 ###
 
 @app.get("/db_results", response_model=List[schemas.ScanResultSchema])
-async def get_all_from_db() -> list:
+async def get_all_from_db():
     """
     Эта функция используется для работы с жестким диском
     и БД на SQL после работы функции perform_analysis из main.py.
@@ -90,4 +91,9 @@ async def get_all_from_db() -> list:
     "Рейтинг опасности" 
     """
     info = crud.get_all_results()
+    return info
+
+@app.get("/db_quite_pull", response_model=List[schemas.PullQuite])
+async def get_pull_quite_from_db():
+    info = crud.get_pull_quite()
     return info
