@@ -2,4 +2,6 @@
 Авторы:
     Пятков Дмитрий - supspitdamn
     Лемза Семен - hoomas
-    Панченко Даниил - UNKNOWN
+    Панченко Даниил - papacapitan
+
+для запуска и тестирования в консоли пишем: pyhton -m uvicorn compliance_scanner.main:app --reload
