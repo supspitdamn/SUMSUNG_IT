@@ -38,3 +38,10 @@ class ScanStatus(BaseModel):
     task_id: str = Field(description="Уникальный идентификатор задачи")
     status: str = Field(description="Текущее состояние сканирования")
     message: Optional[str] = Field(None, description="Дополнительное инфо от сервера")
+
+class PullQuite(BaseModel):
+    Просканированно: int = Field(description="Просканированно файлов")
+    Самый_опасный_файл: str = Field(description="Самый опасный файл")
+    Высшая_степень_опасности: float = Field(description="Наивысшая опасность")
+    Детали: str = Field(description="Детали")
+
