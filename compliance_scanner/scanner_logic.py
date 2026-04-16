@@ -367,7 +367,7 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
         info = row["Содержание"].lower()
 
         # Тут Даня пиши свой код выявления ПДн. 
-    
+        
     return df
 
 def evaluate_violations(df: pd.DataFrame) -> pd.DataFrame:

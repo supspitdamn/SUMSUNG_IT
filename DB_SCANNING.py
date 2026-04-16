@@ -357,17 +357,52 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
 
     }
 
+    import re
+
+    # Система штрафов
+    FINES = {
+        "Паспорт": 5000,
+        "СНИЛС": 4000,
+        "Телефон": 1000,
+        "ИНН": 3000,
+        "Email": 800,
+        "Биометрия: лицо": 10000,
+        "Биометрия: глаза": 10000,
+        "Биометрия: отпечатки": 10000,
+        "Медицина: Диагноз/Анамнез": 7000,
+        "Медицина: Полис ОМС": 2000,
+        "Медицина: Рецепт/Препараты": 6000,
+        "Медицина: Медучреждение": 5000,
+    }
+
     for idx, row in df.iterrows():
 
         if row["Содержание"].split(" ")[0] == "Ошибка":
-
             df.at[idx, "Найденные ПДн"] = "Нет никаких нарушений"
+            df.at[idx, "Рейтинг опасности"] = 0.0
             continue
 
         info = row["Содержание"].lower()
 
-        # Тут Даня пиши свой код выявления ПДн. 
-    
+        # Тут Даня пиши свой код выявления ПДн.
+        found_pdns = []
+        total_fine = 0
+
+        for pattern_name, pattern in patterns.items():
+            try:
+                if re.search(pattern, info, re.IGNORECASE):
+                    found_pdns.append(pattern_name)
+                    total_fine += FINES.get(pattern_name, 1000)
+            except Exception:
+                continue
+
+        if found_pdns:
+            df.at[idx, "Найденные ПДн"] = ", ".join(found_pdns)
+            df.at[idx, "Рейтинг опасности"] = total_fine
+        else:
+            df.at[idx, "Найденные ПДн"] = "Нет никаких нарушений"
+            df.at[idx, "Рейтинг опасности"] = 0.0
+
     return df
 
 def evaluate_violations(df: pd.DataFrame) -> pd.DataFrame:
