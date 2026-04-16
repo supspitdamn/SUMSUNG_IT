@@ -1,0 +1,28 @@
+"""
+pip install -r requirements.txt
+"""
+
+# Web & API
+fastapi==0.110.0         # Сам наш апи
+uvicorn[standard]==0.27.1# Дает ASGI-сервер. Для чтения порта и принятие запросов
+pydantic==2.6.3
+
+# Data
+pandas==2.2.1
+
+# Document Parsing
+pymupdf==1.23.26         # Для пдфки
+python-docx==1.1.0       # Для доксов
+
+# OCR & Images
+pytesseract==0.3.10
+Pillow==10.2.0
+
+# AI & Audio
+openai-whisper==20231117
+torch                    
+numpy<2.0.0
+
+# Utilities
+python-dotenv==1.0.1
+
