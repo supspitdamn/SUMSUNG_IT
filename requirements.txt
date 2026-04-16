@@ -1,0 +1,8 @@
+pandas
+PyMuPDF
+python-docx
+openai-whisper
+pytesseract
+Pillow
+openpyxl
+xlrd
