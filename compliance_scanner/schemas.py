@@ -20,6 +20,10 @@ from pydantic import BaseModel, Field
 from typing import Optional
 
 class ScanResultSchema(BaseModel):
+    """
+    Данный класс показывает шаблон того, как должен выглядеть результат
+    работы сканера
+    """
     # Field помогает добавить описание (description) и пример (examples)
     # alias связывает переменную Python с именем колонки в БД/Pandas
     Имя_файла: str = Field(alias="Имя файла", description="Название файла без расширения", examples=["passport_scan"])
@@ -35,11 +39,19 @@ class ScanResultSchema(BaseModel):
         populate_by_name = True
 
 class ScanStatus(BaseModel):
+    """
+    Данный класс показывает шаблон того, как должен выглядеть результат
+    опроса пользователем состояния запроса
+    """
     task_id: str = Field(description="Уникальный идентификатор задачи")
     status: str = Field(description="Текущее состояние сканирования")
     message: Optional[str] = Field(None, description="Дополнительное инфо от сервера")
 
 class PullQuite(BaseModel):
+    """
+    Данный класс показывает шаблон того, как должен выглядеть результат
+    работы вытяжки основной информации из анализа
+    """
     Просканированно: int = Field(description="Просканированно файлов")
     Самый_опасный_файл: str = Field(description="Самый опасный файл")
     Высшая_степень_опасности: float = Field(description="Наивысшая опасность")
