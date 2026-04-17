@@ -687,8 +687,6 @@ def run_scanning(path: str)->pd.DataFrame:
     print(f"\nВремя оценки нарушений: {round(time_step4, 2)} сек.")
 
     print(extracted_df)
-    print("Готово!")
-    print(evaluated_df)
 
     try:
         conn = sqlite3.connect("DataBase.db")
