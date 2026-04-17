@@ -1,10 +1,6 @@
-"""
-pip install -r requirements.txt
-"""
-
 # Web & API
 fastapi==0.110.0         # Сам наш апи
-uvicorn[standard]==0.27.1# Дает ASGI-сервер. Для чтения порта и принятие запросов
+uvicorn[standard]==0.27.1 # Дает ASGI-сервер. Для чтения порта и принятие запросов
 pydantic==2.6.3
 
 # Data
@@ -31,3 +27,9 @@ python-dotenv==1.0.1
 # Биометерия
 opencv-python>=4.9
 mediapipe>=0.10.9
+
+# frontend
+streamlit==1.32.0
+requests==2.31.0
+matplotlib
+
