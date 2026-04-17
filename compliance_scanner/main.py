@@ -41,6 +41,8 @@ async def start_scan(path: str, background_tasks: BackgroundTasks):
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="Такого пути нет")
     
+    crud.clear_db()
+    
     task_id = str(uuid.uuid4())
     tasks[task_id] = {"status": "В процессе..."}
 
