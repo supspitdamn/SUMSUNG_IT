@@ -77,39 +77,57 @@ st.sidebar.markdown("---")
 if st.sidebar.button(label="Получить подробный отчет"):
     st.session_state['show_full_report'] = not st.session_state['show_full_report'] # Простая инверсия состояния
 
-if start_button: # Сама кнопка возвращает True или False
+if start_button: 
     st.session_state['scan_finished'] = False 
     st.session_state['show_full_report'] = False
-    # Две предыдущие строки выполняются для того, чтобы убрать с экрана предыдущие результаты
-    # Это также подготовка к новым данным
 
-    if path_to_scan: # Сканирование работает только если есть путь
+    if path_to_scan: 
         try:
-            res = requests.post(f"{BASE_URL}/scan", params={"path": path_to_scan}) # Обращаемся к АПИ с запросом по сканированию
-            if res.status_code == 200: # По протоколу HTTP этот код значит успешность принятия запроса
-
-                task_id = res.json().get("task_id") # Получаем айди задания
+            res = requests.post(f"{BASE_URL}/scan", params={"path": path_to_scan}) 
+            if res.status_code == 200: 
+                task_id = res.json().get("task_id") 
+                
+                # Создаем контейнеры для лога и прогресс-бара
                 file_logger = st.empty()
+                progress_bar = st.empty() 
 
                 with st.status("Идет анализ...", expanded=True) as status:
-
                     while True: 
-                        check = requests.get(f"{BASE_URL}/result/{task_id}").json() # В цикле происходит опрос АПИ по состоянию задания
+                        check = requests.get(f"{BASE_URL}/result/{task_id}").json() 
+                        
+                        # Достаем данные для прогресса
                         current_file = check.get("current_file", "Подготовка...")
-                        file_logger.write(f"📁 **Обработка:** {current_file}")
+                        pos = check.get("current_file_pos", 0)
+                        total = check.get("total_files", 0)
 
-                        if check.get("Статус") == "выполнено": # выходим из цикла по выполнении
+                        # Обновляем текстовый лог
+                        if total > 0:
+                            file_logger.write(f"📁 **Обработка:** {current_file} ({pos} из {total})")
+                            print(pos)
+                            print(total)
+                            progress_bar.progress(pos / total)
+                        else:
+                            file_logger.write(f"📁 **Обработка:** {current_file}")
+
+                        if check.get("status") == "выполнено": 
+                            # Убираем временные элементы перед перезагрузкой
+                            file_logger.empty()
+                            progress_bar.empty()
+                            
                             status.update(label="Готово!", state="complete", expanded=False)
                             st.session_state['scan_finished'] = True
-                            st.rerun() # По сути перезапускаем скрипт заново. Так, теперь у нас scan_finished = True и кнопка не нажата
-                            #будет просто визуализирована информация
                             break
 
-                        time.sleep(0.5)
+                        if st.session_state["scan_finished"]:
+                            break
 
-                        time.sleep(1)
+                        time.sleep(0.5) # Достаточно одного sleep
+                    
+                st.rerun()
+
         except Exception as e:
             st.error(f"Ошибка связи: {e}")
+
 
 if st.session_state['scan_finished']: # Сканирование завершено - выводим базовую информацию
     st.subheader("Краткая сводка")
