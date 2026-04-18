@@ -7,6 +7,8 @@
 @echo off  
 :: Отлючаем вывод всякой низкоуровневой служебной информации
 echo Starting Backend...
+
+call venv\Scripts\activate
 start /b python -m uvicorn compliance_scanner.main:app
 :: Фоново запускаем сервер с АПИ в этом же окне
 timeout /t 3
