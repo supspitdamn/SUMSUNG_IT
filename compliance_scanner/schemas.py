@@ -49,6 +49,8 @@ class ScanStatus(BaseModel):
     status: str = Field(description="Текущее состояние сканирования")
     message: Optional[str] = Field(None, description="Дополнительное инфо от сервера")
     current_file: str
+    current_file_pos: int
+    total_files: int
 
 class PullQuite(BaseModel):
     """

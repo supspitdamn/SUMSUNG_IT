@@ -149,9 +149,11 @@ def parsing(df: pd.DataFrame,  update_callback = None) -> None:
     
     audio_model = whisper.load_model("base")
 
+    size = len(df)
+
     for idx, row in df.iterrows():
         if update_callback:
-            update_callback(str(row["Имя файла"] + str(row["Расширение"])))
+            update_callback(str(row["Имя файла"] + str(row["Расширение"])), idx + 1, size)
         path = row["Путь"]
         path = os.path.normpath(path=path)
         ext = row["Расширение"]

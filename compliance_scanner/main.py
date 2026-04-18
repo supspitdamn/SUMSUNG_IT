@@ -44,7 +44,11 @@ async def start_scan(path: str, background_tasks: BackgroundTasks):
     crud.clear_db()
     
     task_id = str(uuid.uuid4())
-    tasks[task_id] = {"status": "В процессе...", "current_file": "Инициализация работы..."}
+    tasks[task_id] = {"status": "В процессе...",
+                       "current_file": "Инициализация работы...", 
+                       "current_file_pos" : 0, 
+                       "total_files": 0
+                       }
 
     background_tasks.add_task(perform_analysis, task_id, path)
 
@@ -53,7 +57,9 @@ async def start_scan(path: str, background_tasks: BackgroundTasks):
         "task_id": task_id, 
         "status": "В процессе...", 
         "message": "Начало сканирования...",
-        "current_file": "Поиск файлов..."
+        "current_file": "Поиск файлов...",
+        "current_file_pos": 0,
+        "total_files": 0
     }
 
 ###
@@ -65,19 +71,22 @@ def perform_analysis(task_id: str, path: str) -> None:
     сканирования. По исходу формируется .json структура (построчно df)
     """
 
-    def update_callback(strochka: str = "") -> None:
+    def update_callback(strochka: str = "", pos: int = 0, total: int = 0) -> None:
+
         tasks[task_id]["current_file"] = strochka
+        tasks[task_id]["current_file_pos"] = pos
+        tasks[task_id]["total_files"] = total
 
     try:
 
         result_df = run_scanning(path, update_callback=update_callback)
         print(result_df)
         tasks[task_id] = {
-            "Статус": "выполнено",
+            "status": "выполнено",
             "Результаты": result_df.to_dict(orient="records")
         }
     except Exception as e:
-        tasks[task_id] = {"Статус": "ошибка", "Детали": str(e)}
+        tasks[task_id] = {"status": "ошибка", "Детали": str(e)}
 
 ###
 
@@ -86,7 +95,18 @@ async def get_results(task_id: str) -> dict:
     """
     Функция по айдишнику возвращает пользователю ответ на его запрос
     """
-    return tasks.get(task_id, {"error": "Task not found"})
+    task = tasks.get(task_id)
+    if not task:
+        return {"error": "Task not found"}
+        
+    return {
+        "task_id": task_id,
+        "status": task.get("status", "неизвестно"),
+        "current_file": task.get("current_file", "Подготовка..."),
+        "current_file_pos": task.get("current_file_pos", 0),
+        "total_files": task.get("total_files", 0)
+    }
+
 
 ###
 
