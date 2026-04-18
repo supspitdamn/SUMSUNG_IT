@@ -38,45 +38,6 @@ pytesseract.pytesseract.tesseract_cmd = os.path.join(
 VALID_BICS = set()
 BIC_TO_BANK_INFO = {}
 
-# Глобальные переменные для хранения инициализированных объектов (вне функции)
-_NATASHA_INITIALIZED = False
-_NATASHA_SEGMENTER = None
-_NATASHA_MORPH_VOCAB = None
-_NATASHA_NER_TAGGER = None
-_NATASHA_DATES_EXTRACTOR = None
-_VALID_BICS = set()
-
-def _init_natasha():
-    """Инициализация Natasha (вызывается один раз)"""
-    global _NATASHA_INITIALIZED, _NATASHA_SEGMENTER, _NATASHA_MORPH_VOCAB
-    global _NATASHA_NER_TAGGER, _NATASHA_DATES_EXTRACTOR
-    
-    if _NATASHA_INITIALIZED:
-        return
-    
-    try:
-        from natasha import (
-            Segmenter, MorphVocab, NewsEmbedding,
-            NewsNERTagger, DatesExtractor, Doc
-        )
-        
-        print("Загрузка моделей Natasha (может занять 10-15 секунд)...")
-        _NATASHA_SEGMENTER = Segmenter()
-        _NATASHA_MORPH_VOCAB = MorphVocab()
-        emb = NewsEmbedding()
-        _NATASHA_NER_TAGGER = NewsNERTagger(emb)
-        _NATASHA_DATES_EXTRACTOR = DatesExtractor(_NATASHA_MORPH_VOCAB)
-        
-        _NATASHA_INITIALIZED = True
-        print("Модели Natasha загружены успешно")
-    except ImportError:
-        print("Предупреждение: библиотека natasha не установлена. NLP-функции будут отключены.")
-        _NATASHA_INITIALIZED = True  # Отмечаем как инициализированное, но с ошибкой
-    except Exception as e:
-        print(f"Ошибка инициализации Natasha: {e}")
-        _NATASHA_INITIALIZED = True
-
-
 def _init_bic_directory():
     """Инициализация справочника БИК (вызывается один раз)"""
     global _VALID_BICS
@@ -810,7 +771,7 @@ def parsing(df, update_callback=None):
     """
     tasks = [(idx, row["Путь"], row["Расширение"]) for idx, row in df.iterrows()]
     
-    with concurrent.futures.ProcessPoolExecutor(max_workers=4) as executor:
+    with concurrent.futures.ProcessPoolExecutor(max_workers=8) as executor:
         futures = {executor.submit(worker_parse_file, t): t for t in tasks}
         for i, f in enumerate(concurrent.futures.as_completed(futures)):
             res_idx, content = f.result()
@@ -829,49 +790,140 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
     Функция возвращает датафрейм с заполненной колонкой "Найденные ПДн".
     ПДн в колонке записаны в формате: ПДн(n1),ПДн(n2),...,ПДн(nN).
     Где ПДн - это некий ПДн, заданный в задании, n - количество найденных ПДн данного типа.
+    
+    АЛГОРИТМ РАБОТЫ:
+    1. Инициализация справочника БИК
+    2. Определение словарей ключевых слов для "мягких" категорий (ФИО, Адрес, Национальность и т.д.)
+    3. Определение паттернов для "жестких" ПДн (СНИЛС, ИНН, телефон и т.д.)
+    4. Для каждой строки датафрейма:
+       a. Поиск "мягких" категорий: подсчёт количества вхождений ключевых слов
+       b. Для категории "Адрес" дополнительно поиск по паттернам адресов
+       c. Поиск "жестких" ПДн по паттернам с валидацией
+       d. Формирование строки результата: ПДн1(кол-во),ПДн2(кол-во),...
     """
     import re
     from collections import defaultdict
     from datetime import datetime
     
-    # Инициализация Natasha и справочника БИК (один раз)
-    _init_natasha()
     _init_bic_directory()
     
     # ========================================================================
-    # 1. КЛЮЧЕВЫЕ СЛОВА ДЛЯ КОНТЕКСТА
+    # 1. КЛЮЧЕВЫЕ СЛОВА ДЛЯ "МЯГКИХ" КАТЕГОРИЙ (только маркеры, не сами данные)
+    #    Каждое вхождение ключевого слова увеличивает счётчик на 1
     # ========================================================================
+    
+     # 1.1 Дата рождения
     BIRTH_KEYWORDS = [
-        "родился", "родилась", "рождение", "рождён", "рождена",
-        "дата рождения", "день рождения", "год рождения",
-        "дата рожд", "г.р.", "г. рождения", "г р", "г рожд",
-        "место рождения", "уроженец", "уроженка",
-        "date of birth", "birth date", "born"
+        "дат[ауеы]?\\s+рождени[яюйем]?", "день\\s+рождени[яюйем]?",
+        "год\\s+рождени[яюйем]?", "г\\.?\\s*р\\.?", "г[ /-]р",
+        "родил(?:ся|ась|ось|ись)", "рождени[яеюйем]?", "рожд[её]н[аы]?",
+        "урожене[цк]", "место\\s+рожд",
+        "birth\\s*(?:day|date)?", "dob", "d\\.?o\\.?b\\.?", "born",
+        "geburt", "geboren",
     ]
     
+    # 1.2 ФИО
+    FIO_KEYWORDS = [
+        "фамили[яюейи]", "имя", "отчеств[ао]?", "фио", "ф\\.?и\\.?о\\.?",
+        "инициалы", "ф\\.?и\\.?",
+        "full\\s*name", "surname", "first\\s*name", "last\\s*name",
+        "middle\\s*name", "given\\s*name", "family\\s*name", "patronymic",
+        "name:?\\s", "nombre", "apellido", "prénom", "nome", "cognome",
+        "nachname", "vorname",
+    ]
+    
+    # 1.3 Адрес (объединённая категория)
     ADDRESS_KEYWORDS = [
-        "адрес регистрации", "место регистрации", "зарегистрирован по адресу",
-        "адрес места жительства", "место жительства", "прописка",
-        "проживает по адресу", "регистрация по адресу"
+        "адрес", "регистраци[яи]", "зарегистрирован[аыо]?",
+        "прописк[аеи]", "прописан[аыо]?", "прожива(?:ет|ю|ют|ние)",
+        "местожительство", "жительство", "почтовый\\s+адрес",
+        "индекс", "почтовый\\s+индекс",
+        "место\\s+рожд", "урожене[цк]", "м\\.?р\\.?",
+        "address", "residence", "registered", "place\\s+of\\s+(?:birth|residence|living)",
+        "birthplace", "pob", "p\\.?o\\.?b\\.?", "postal\\s+address", "zip\\s*code",
+        "adresse", "dirección", "indirizzo", "anschrift", "wohnort",
     ]
     
-    # Маркеры организаций и юр.лиц для фильтрации
-    ORGANIZATION_MARKERS = [
-        "ооо", "оао", "зао", "пао", "ао", "ип", "нко", "гк", "гбу", "мбу",
-        "фгуп", "муп", "компания", "организация", "учреждение", "предприятие",
-        "корпорация", "банк", "группа", "холдинг", "фирма", "завод", "фабрика",
-        "комбинат", "объединение", "союз", "ассоциация", "фонд", "партия",
-        "департамент", "управление", "отдел", "служба", "агентство", "бюро",
-        "центр", "институт", "университет", "академия", "министерство",
-        "ведомство", "комитет", "совет", "администрация", "правительство",
-        "прокуратура", "суд", "инспекция", "казначейство", "лицей", "гимназия",
-        "школа", "колледж", "техникум", "училище", "больница", "поликлиника",
-        "аптека", "магазин", "торговый", "строительная", "производственная",
-        "транспортная", "страховая", "управляющая", "ресурсоснабжающая",
+    # 1.4 Национальность
+    NATIONALITY_KEYWORDS = [
+        "национальност", "наци[яи]", "этнос", "этническ",
+        "народност", "гражданств[ао]", "граждан(?:ин|ка)",
+        "nationality", "nation", "ethnic(?:ity|\\s+group)?", "ethnos",
+        "citizenship", "citizen", "nationalit[äé]",
+    ]
+    
+    # 1.5 Раса
+    RACE_KEYWORDS = [
+        "рас[аы]", "расов",
+        "европеоид", "кавказоид", "монголоид", "негроид", "австралоид", "американоид",
+        "race", "racial", "caucas(?:ian|oid)", "mongoloid", "negroid", "australoid",
+        "white\\s*(?:race|people)?", "black\\s*(?:race|people)?", "asian", "hispanic", "latino",
+        "african", "european", "indigenous", "rasse", "razza", "raza",
+    ]
+    
+    # 1.6 Религиозные убеждения
+    RELIGION_KEYWORDS = [
+        "религи[яи]", "религиозн", "вероисповедани[ея]",
+        "вер[аы]", "верующ", "конфесси[яи]",
+        "православ", "христиан", "католи[кц]", "протестан",
+        "ислам", "мусульман", "муслим", "будди[зс]", "иудаизм", "иудей",
+        "индуизм", "атеи[зс]", "агностик", "сект[аы]", "культ",
+        "religion", "religious", "faith", "creed", "denomination",
+        "christian", "catholic", "protestant", "orthodox", "islam", "muslim",
+        "buddhism", "judaism", "jewish", "hinduism", "atheism",
+        "glaube", "glaubens", "religi[ös]",
+    ]
+    
+    # 1.7 Политические убеждения
+    POLITICAL_KEYWORDS = [
+        "политическ", "парти[яй]", "партийн",
+        "коммунист", "либерал", "консерватор", "социал[ -]?демократ",
+        "социалист", "националист", "анархист", "демократ", "монархист",
+        "республикан", "оппозици[яи]", "электорат",
+        "political", "politics", "party\\s+member", "communist", "liberal",
+        "conservative", "social\\s*democrat", "socialist", "nationalist",
+        "anarchist", "democrat", "monarchist", "republican", "opposition",
+        "right[ -]wing", "left[ -]wing",
+    ]
+    
+    # 1.8 Судимость
+    CRIMINAL_KEYWORDS = [
+        "судимост", "судим[аы]?", "не\\s*судим", "осужд[её]н[аы]?",
+        "привлекал(?:ся|ась|ись)", "уголовн", "преступлен", "преступни[кц]",
+        "правонарушен", "судебн", "приговор[её]н", "отбывал[аи]?",
+        "заключени[ея]", "заключ[её]нн", "тюрьм", "лишени[ея]\\s+свободы",
+        "условн", "погашен", "криминальн", "следстви[ея]", "дознани[ея]",
+        "обвинени[ея]", "обвиняем", "подозреваем", "арестован[аы]?",
+        "рецидив", "criminal\\s+(?:record|history|background)",
+        "convict(?:ion|ed)", "crime", "offen[cs]e", "prosecut",
+        "arrest(?:ed)?", "detention", "prison", "jail", "incarcerat",
+        "sentenc(?:e|ed)", "probation", "felony", "misdemeanor",
+        "vorstrafe", "vorbestraft", "casier\\s+judiciaire",
+    ]
+    
+    # 1.9 Медицина
+    MEDICAL_KEYWORDS = [
+        "диагноз", "заболевани[еяй]", "болезн[ьи]", "анамнез", "жалоб[аы]?",
+        "лечени[еяю]", "терапи[яи]", "мкб[ -]?1[01]", "icd[ -]?1[01]",
+        "рецепт", "назначен[аоы]?", "таблетк[аи]", "дозировк[аи]", "доз[аы]",
+        "больниц[аы]", "поликлиник[аи]", "медцентр", "клиник[аи]",
+        "вра[чч]", "медицинск", "медкарт", "истори[яи]\\s+болезни",
+        "пациент", "симптом[ы]?", "осмотр", "обследовани[ея]",
+        "анализ[ы]?", "рентген", "мрт", "кт\\s", "узи", "экг",
+        "хирурги[яч]", "операци[яи]", "стационар", "амбулаторн",
+        "инвалидност", "инвалид", "хроническ", "аллерги[яч]",
+        "онкологи[яч]", "рак[ао]?", "диабет", "гипертони[яч]", "астм[аы]",
+        "эпилепси[яч]", "психиатри[яч]", "психологи[яч]", "депресси",
+        "diagnos(?:is|e|ed)", "disease", "illness", "sickness", "condition",
+        "medical\\s+(?:history|record)", "treatment", "therapy", "medic(?:ation|ine)",
+        "prescription", "dosage", "symptom", "patient", "doctor", "physician",
+        "hospital", "clinic", "examination", "checkup", "surgery", "disability",
+        "chronic", "allergy", "oncology", "cancer", "diabetes", "hypertension",
+        "asthma", "epilepsy", "psychiatry", "psychology", "depression",
     ]
     
     # ========================================================================
-    # 2. ПАТТЕРНЫ ДЛЯ ПОИСКА
+    # 2. ПАТТЕРНЫ ДЛЯ ПОИСКА "ЖЕСТКИХ" ПДн (СНИЛС, ИНН, телефон и т.д.)
     # ========================================================================
     patterns = {
         "Телефон": r"(?:\+7|8)[\s\(-]?\d{3}[\s\)-]?\d{3}[\s-]?\d{2}[\s-]?\d{2}\b",
@@ -884,7 +936,6 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
         "Банковская карта": r"\b(?:\d{4}[- ]?){3}\d{4}\b",
         "CVV": r"(?:cvv|cvc|код\s+безопасности|код\s+карты|cvv2/cvc2|код\s+cvv|cvv\s+код)\s*:?\s*\d{3}\b",
         "Заработная плата": r"\b(?:зарплата|оклад|доход|зп|заработная\s+плата|ежемесячный\s+доход|среднемесячный\s+доход)\b\s*:?\s*\d+",
-        "Медицина": r"\b(?:диагноз|заболевание|болезнь|анамнез|жалобы|лечение|терапия|мкб-\d+|рецепт|назначено|таблетки|дозировка|больница|поликлиника|медцентр|клиника|врач|медицинская\s+карта)\b",
         "Полис ОМС": r"\b(?:полис|омс|страховой\s+полис|медицинский\s+полис)\b\s*:?\s*\b\d{16}\b",
         "Биометрия: лицо": r"\[БИОМЕТРИЯ[^\]]*лицо",
         "Биометрия: глаза": r"\[БИОМЕТРИЯ[^\]]*глаза",
@@ -895,39 +946,79 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
     }
     
     # ========================================================================
-    # 3. СПИСКИ ДЛЯ ПРОВЕРКИ
+    # 3. ПАТТЕРНЫ ДЛЯ ПОИСКА АДРЕСОВ (дополнительно к ключевым словам)
+    #    Используются типичные шаблоны российских и международных адресов
     # ========================================================================
-    RACE_VALUES = {
-        "европеоид", "европеоидная", "европеоидной", "европеоидную", "европеоидный",
-        "кавказоид", "кавказоидная", "кавказоидной", "кавказоидную", "кавказоидный",
-        "монголоид", "монголоидная", "монголоидной", "монголоидную", "монголоидный",
-        "негроид", "негроидная", "негроидной", "негроидную", "негроидный",
-        "австралоид", "австралоидная", "австралоидной", "австралоидную", "австралоидный",
-    }
+    ADDRESS_PATTERNS_COMPILED = [
+        re.compile(p, re.IGNORECASE) for p in [
+            r'\b\d{6}\s*,?\s*(?:г\.?|город)\s*[А-Яа-я\s\-]+',
+            r'(?:ул\.?|улица|пр-т|проспект|пер\.?|переулок|пл\.?|площадь|б-р|бульвар|наб\.?|набережная|ш\.?|шоссе)\s+[А-Яа-я0-9\s\-\.,]+\s*(?:д\.?|дом)\s*\d+[а-яА-Я]?(?:\s*(?:к\.?|корп\.?|корпус)\s*\d+)?(?:\s*(?:кв\.?|квартира)\s*\d+)?',
+            r'\b\d{6}\b',
+            r'(?:г\.?|город)\s*[А-Яа-я\s\-]+,\s*(?:ул\.?|улица|пр-т|проспект)\s*[А-Яа-я\s\-\.]+,\s*\d+',
+            r'\b(?:область|край|республика|АО|автономный округ)\s+[А-Яа-я\s\-]+\b',
+            r'\d+\s+[A-Za-z\s]+(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Drive|Dr|Lane|Ln|Way|Court|Ct|Plaza|Pl)\.?\s*,?\s*[A-Za-z\s]+,\s*[A-Z]{2}\s*\d{5}',
+            r'\b\d{5}(?:-\d{4})?\s+[A-Za-z\s]+\b',
+            r'P\.?O\.?\s*Box\s*\d+',
+            r'(?:адрес|address|addr\.?)\s*:?\s*[^\n\.]+',
+        ]
+    ]
     
-    NATIONALITIES = {
-        "русский", "русская", "татарин", "татарка", "украинец", "украинка",
-        "башкир", "башкирка", "чуваш", "чувашка", "чеченец", "чеченка",
-        "армянин", "армянка", "азербайджанец", "азербайджанка", "казах", "казашка",
-        "белорус", "белоруска", "узбек", "узбечка", "таджик", "таджичка",
-        "киргиз", "киргизка", "грузин", "грузинка", "молдаванин", "молдаванка",
-        "немец", "немка", "еврей", "еврейка", "кореец", "кореянка", "китаец", "китаянка",
-    }
+    # ========================================================================
+    # 4. КАРТА "МЯГКИХ" КАТЕГОРИЙ И ИХ КЛЮЧЕВЫХ СЛОВ
+    # ========================================================================
+    SOFT_CATEGORIES_COMPILED = {}
     
-    RELIGIONS = {
-        "православие", "христианство", "ислам", "буддизм", "иудаизм",
-        "католицизм", "протестантизм", "индуизм", "атеист", "агностик"
-    }
+    for category_name, keywords in [
+        ("Дата рождения", BIRTH_KEYWORDS),
+        ("ФИО", FIO_KEYWORDS),
+        ("Адрес", ADDRESS_KEYWORDS),
+        ("Национальность", NATIONALITY_KEYWORDS),
+        ("Раса", RACE_KEYWORDS),
+        ("Религиозные убеждения", RELIGION_KEYWORDS),
+        ("Политические убеждения", POLITICAL_KEYWORDS),
+        ("Судимость", CRIMINAL_KEYWORDS),
+        ("Медицина", MEDICAL_KEYWORDS),
+    ]:
+        # Сортируем по длине (длинные первыми, чтобы избежать частичных совпадений)
+        sorted_keywords = sorted(keywords, key=len, reverse=True)
+        # Создаём единый паттерн: (слово1|слово2|слово3)
+        pattern = r'(?:' + '|'.join(re.escape(kw) for kw in sorted_keywords) + r')'
+        # Компилируем с флагом IGNORECASE
+        SOFT_CATEGORIES_COMPILED[category_name] = re.compile(pattern, re.IGNORECASE)
     
-    POLITICAL_VIEWS = {
-        "коммунист", "либерал", "консерватор", "социал-демократ",
-        "националист", "анархист", "социалист", "демократ", "монархист"
-    }
+    # ========================================================================
+    # 5. ФУНКЦИЯ ПОДСЧЁТА КЛЮЧЕВЫХ СЛОВ В ТЕКСТЕ
+    #    Возвращает количество уникальных позиций вхождений
+    # ========================================================================
+    def count_soft_matches_fast(text: str, compiled_pattern) -> int:
+        """
+        Быстрый подсчёт количества вхождений ключевых слов.
+        Использует прекомпилированный паттерн.
+        """
+        if not text or text == "НЕТ ДОСТУПА":
+            return 0
+        # finditer возвращает итератор, len(list()) считает количество
+        return len(list(compiled_pattern.finditer(text)))
     
-    CRIMINAL_WORDS = {
-        "судимость", "судим", "осужден", "привлекался", "несудим"
-    }
+    # ========================================================================
+    # 6. ФУНКЦИЯ ПОДСЧЁТА АДРЕСОВ ПО ПАТТЕРНАМ
+    #    Ищет паттерны адресов и возвращает количество найденных
+    # ========================================================================
+    def count_address_patterns_fast(text: str) -> int:
+        """Быстрый поиск адресов по прекомпилированным паттернам."""
+        if not text or text == "НЕТ ДОСТУПА":
+            return 0
+        found_positions = set()
+        for pattern in ADDRESS_PATTERNS_COMPILED:
+            for match in pattern.finditer(text):
+                found_positions.add(match.start())
+        return len(found_positions)
     
+    # ========================================================================
+    # 7. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ВАЛИДАЦИИ ДЛЯ "ЖЕСТКИХ" ПДн
+    # ========================================================================
+    
+    # Списки для валидации телефона
     VALID_OPERATOR_CODES = {
         "900", "901", "902", "903", "904", "905", "906", "908", "909",
         "910", "911", "912", "913", "914", "915", "916", "917", "918", "919",
@@ -941,11 +1032,8 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
         "990", "991", "992", "993", "994", "995", "996", "997", "999"
     }
     
-    # ========================================================================
-    # 4. ФУНКЦИИ ВАЛИДАЦИИ
-    # ========================================================================
-    
     def is_valid_snils(snils_str: str) -> bool:
+        """Проверка контрольной суммы СНИЛС"""
         digits = re.sub(r'\D', '', snils_str)
         if len(digits) != 11 or digits == "00000000000":
             return False
@@ -956,6 +1044,7 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
         return check == int(digits[9:])
     
     def is_valid_inn(inn_str: str) -> bool:
+        """Проверка контрольной суммы ИНН (10 или 12 цифр)"""
         if not inn_str.isdigit():
             return False
         inn_len = len(inn_str)
@@ -983,6 +1072,7 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
         return False
     
     def is_valid_phone(phone_str: str) -> bool:
+        """Проверка формата и кода оператора телефона"""
         digits = re.sub(r'\D', '', phone_str)
         if len(digits) != 11:
             return False
@@ -992,6 +1082,7 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
         return operator_code in VALID_OPERATOR_CODES
     
     def is_valid_driver_license(license_str: str) -> bool:
+        """Проверка формата водительского удостоверения"""
         VALID_LETTERS = set("АВЕКМНОРСТУХ")
         if len(license_str) != 8:
             return False
@@ -1003,6 +1094,7 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
         return True
     
     def is_valid_mrz(mrz_str: str) -> bool:
+        """Проверка формата MRZ (машиночитаемая зона паспорта)"""
         mrz_clean = mrz_str.replace(' ', '').replace('\n', '').replace('\r', '')
         if len(mrz_clean) not in [44, 88]:
             return False
@@ -1011,6 +1103,7 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
         return True
     
     def is_valid_card_number(card_str: str) -> bool:
+        """Проверка номера банковской карты по алгоритму Луна"""
         digits = re.sub(r'[\s-]', '', card_str)
         if not digits.isdigit() or len(digits) != 16:
             return False
@@ -1025,6 +1118,7 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
         return total % 10 == 0
     
     def is_valid_bic(bic_str: str) -> bool:
+        """Проверка БИК по справочнику ЦБ"""
         if not bic_str.isdigit() or len(bic_str) != 9:
             return False
         if not bic_str.startswith('04'):
@@ -1032,6 +1126,7 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
         return bic_str in _VALID_BICS
     
     def is_valid_bank_account(account_str: str, bic_str: str = None) -> tuple:
+        """Проверка расчётного счёта по БИК"""
         digits = re.sub(r'\D', '', account_str)
         if len(digits) != 20:
             return (False, "не 20 цифр")
@@ -1051,10 +1146,12 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
         return (False, "нет БИК для проверки")
     
     def is_valid_cvv(cvv_str: str) -> bool:
+        """Проверка CVV/CVC кода (3 цифры)"""
         digits = re.sub(r'\D', '', cvv_str)
         return len(digits) == 3 and digits.isdigit()
     
     def is_valid_oms_policy(policy_str: str) -> bool:
+        """Проверка полиса ОМС (16 цифр с контрольной суммой)"""
         digits = re.sub(r'\D', '', policy_str)
         if len(digits) != 16:
             return False
@@ -1063,374 +1160,10 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
         return total % 10 == 0
     
     # ========================================================================
-    # 5. ФУНКЦИЯ ПОИСКА ФИО ЧЕРЕЗ NATASHA
-    # ========================================================================
-    def find_person_names(text: str, file_path: str = "") -> int:
-        """
-        Ищет ФИО в тексте с помощью Natasha.
-        Фильтрует организации, города, служебные пометки.
-        Объединяет разрозненные части одного ФИО.
-        Удаляет дубликаты.
-        Возвращает количество уникальных ФИО.
-        """
-        if not _NATASHA_INITIALIZED or _NATASHA_NER_TAGGER is None:
-            return 0
-        
-        try:
-            from natasha import Doc
-            
-            # Заменяем переносы строк и табуляции на пробелы
-            normalized_text = re.sub(r'[\n\r\t]+', ' ', text)
-            normalized_text = re.sub(r'\s+', ' ', normalized_text)
-            
-            doc = Doc(normalized_text)
-            doc.segment(_NATASHA_SEGMENTER)
-            doc.tag_ner(_NATASHA_NER_TAGGER)
-            
-            raw_names = []
-            
-            # Слова и паттерны, которые НЕ являются ФИО
-            NOT_NAME_PATTERNS = [
-                r'^[А-ЯЁ]\.\s*[А-ЯЁ]\.$',  # И.О.
-                r'^[А-ЯЁ]\.[А-ЯЁ]\.$',     # И.О.
-                r'^м\.п\.?$',              # М.П.
-                r'^подпись',               # Подпись
-                r'^расшифровка',           # Расшифровка
-                r'^фамилия$',              # Фамилия
-                r'^имя$',                  # Имя
-                r'^отчество$',             # Отчество
-                r'^пол\s',                 # Пол мужской/женский
-                r'^г\.\s',                 # г. Город
-                r'^город\s',               # Город
-            ]
-            
-            # Слова, которые указывают что это не ФИО
-            NOT_NAME_WORDS = {
-                'инженер', 'конструктор', 'менеджер', 'директор', 'руководитель',
-                'специалист', 'администратор', 'оператор', 'техник', 'программист',
-                'аналитик', 'бухгалтер', 'экономист', 'юрист', 'секретарь',
-                'solidworks', 'autodesk', 'inventor', 'microsoft', 'google',
-                'подпись', 'расшифровка', 'фамилия', 'отчество',
-            }
-            
-            if doc is not None and hasattr(doc, 'spans') and doc.spans is not None:
-                for span in doc.spans:
-                    if span is not None and hasattr(span, 'type') and span.type == "PER":
-                        name_text = normalized_text[span.start:span.stop].strip()
-                        name_lower = name_text.lower()
-                        
-                        # Проверяем на паттерны "не ФИО"
-                        is_not_name = False
-                        for pattern in NOT_NAME_PATTERNS:
-                            if re.match(pattern, name_lower, re.IGNORECASE):
-                                is_not_name = True
-                                break
-                        
-                        if is_not_name:
-                            print(f"[ФИО DEBUG]   -> Отфильтровано по паттерну: '{name_text}'")
-                            continue
-                        
-                        # Проверяем на слова "не ФИО"
-                        words = name_lower.split()
-                        has_not_name_word = any(word in NOT_NAME_WORDS for word in words)
-                        if has_not_name_word:
-                            print(f"[ФИО DEBUG]   -> Отфильтровано по словарю: '{name_text}'")
-                            continue
-                        
-                        # Проверяем что ФИО содержит хотя бы одно слово с заглавной буквы (не все капсом)
-                        # Это отсеет "ПОЛ МУЖСКОЙ", "М.П." и т.д.
-                        if name_text.isupper() and len(words) <= 2:
-                            # Если всё капсом и короткое - скорее всего не ФИО
-                            print(f"[ФИО DEBUG]   -> Отфильтровано (всё капсом): '{name_text}'")
-                            continue
-                        
-                        # Проверяем контекст на организации и юр.лица
-                        context_start = max(0, span.start - 150)
-                        context_end = min(len(normalized_text), span.stop + 50)
-                        context = normalized_text[context_start:context_end].lower()
-                        
-                        is_org = False
-                        for marker in ORGANIZATION_MARKERS:
-                            if marker in context:
-                                is_org = True
-                                break
-                        
-                        if is_org:
-                            print(f"[ФИО DEBUG]   -> Отфильтровано (организация в контексте): '{name_text}'")
-                            continue
-                        
-                        raw_names.append({
-                            'text': name_text,
-                            'start': span.start,
-                            'end': span.stop,
-                            'words': set(name_text.lower().split())
-                        })
-            
-            # Логирование сырых найденных PER
-            if raw_names:
-                print(f"\n[ФИО DEBUG] Файл: {file_path}")
-                print(f"[ФИО DEBUG] Сырые PER от Natasha после фильтрации ({len(raw_names)} шт.):")
-                for i, name in enumerate(raw_names):
-                    print(f"  {i+1}. '{name['text']}' (позиция: {name['start']}-{name['end']})")
-            
-            if not raw_names:
-                print(f"[ФИО DEBUG] Файл: {file_path}")
-                print(f"[ФИО DEBUG] ФИО не найдены\n")
-                return 0
-            
-            # Группируем имена, которые являются частями одного ФИО
-            merged_names = []
-            used = set()
-            
-            for i, name1 in enumerate(raw_names):
-                if i in used:
-                    continue
-                    
-                merged_text = name1['text']
-                merged_start = name1['start']
-                merged_end = name1['end']
-                merged_words = name1['words'].copy()
-                
-                # Ищем другие части этого же ФИО
-                for j, name2 in enumerate(raw_names[i+1:], i+1):
-                    if j in used:
-                        continue
-                    
-                    # Если имена находятся близко (в пределах 100 символов)
-                    distance = min(abs(name2['start'] - merged_end), abs(merged_start - name2['end']))
-                    
-                    if distance < 100:
-                        # Проверяем, не пересекаются ли слова
-                        if not merged_words.intersection(name2['words']):
-                            # Объединяем тексты
-                            if name2['start'] < merged_start:
-                                merged_text = name2['text'] + ' ' + merged_text
-                                merged_start = name2['start']
-                            else:
-                                merged_text = merged_text + ' ' + name2['text']
-                            
-                            merged_end = max(merged_end, name2['end'])
-                            merged_words.update(name2['words'])
-                            used.add(j)
-                            print(f"[ФИО DEBUG]   -> Объединено с '{name2['text']}' (расстояние: {distance})")
-                
-                used.add(i)
-                merged_names.append(merged_text)
-            
-            if merged_names:
-                print(f"[ФИО DEBUG] После объединения ({len(merged_names)} шт.):")
-                for i, name in enumerate(merged_names):
-                    print(f"  {i+1}. '{name}'")
-            
-            # Удаляем дубликаты и фильтруем одиночные слова
-            unique_names = set()
-            for name in merged_names:
-                normalized_name = ' '.join(name.lower().split())
-                words = normalized_name.split()
-                
-                # Оставляем только если минимум 2 слова
-                if len(words) >= 2:
-                    # Дополнительная проверка: слова должны быть кириллицей
-                    if all(re.match(r'^[а-яё-]+$', word) for word in words):
-                        unique_names.add(normalized_name)
-                    else:
-                        print(f"[ФИО DEBUG]   -> Отфильтровано (не кириллица): '{name}'")
-                else:
-                    print(f"[ФИО DEBUG]   -> Отфильтровано (одно слово): '{name}'")
-            
-            # Финальная проверка: удаляем имена, которые являются частью более полных
-            final_names = set()
-            names_list = sorted(list(unique_names), key=len, reverse=True)
-            
-            for name in names_list:
-                is_subset = False
-                for longer_name in final_names:
-                    if name in longer_name:
-                        is_subset = True
-                        print(f"[ФИО DEBUG]   -> Удалено '{name}' (часть '{longer_name}')")
-                        break
-                if not is_subset:
-                    final_names.add(name)
-            
-            print(f"[ФИО DEBUG] Итоговые ФИО ({len(final_names)} шт.):")
-            for i, name in enumerate(sorted(final_names)):
-                print(f"  {i+1}. '{name}'")
-            print()
-            
-            return len(final_names)
-            
-        except Exception as e:
-            print(f"Ошибка при поиске ФИО: {e}")
-            return 0
-    
-    # ========================================================================
-    # 6. ФУНКЦИЯ ПРОВЕРКИ ДАТЫ РОЖДЕНИЯ
-    # ========================================================================
-    def find_birth_dates(text: str) -> list:
-        if not _NATASHA_INITIALIZED or _NATASHA_DATES_EXTRACTOR is None:
-            return []
-        
-        all_dates = []
-        try:
-            for date_match in _NATASHA_DATES_EXTRACTOR(text):
-                year = None
-                date_text = ""
-                date_start = 0
-                date_end = 0
-                
-                if hasattr(date_match, 'fact'):
-                    fact = date_match.fact
-                    year = getattr(fact, 'year', None)
-                    date_text = getattr(fact, 'text', '')
-                    date_start = getattr(date_match, 'start', 0)
-                    date_end = getattr(date_match, 'stop', 0)
-                elif hasattr(date_match, 'year'):
-                    year = date_match.year
-                    date_text = getattr(date_match, 'text', '')
-                    date_start = getattr(date_match, 'start', 0)
-                    date_end = getattr(date_match, 'stop', 0)
-                else:
-                    continue
-                
-                if not year or year < 1900 or year > 2026:
-                    continue
-                
-                if not date_text and date_start < date_end:
-                    date_text = text[date_start:date_end]
-                
-                if not date_text:
-                    continue
-                
-                try:
-                    date_obj = datetime(year, 1, 1)
-                except:
-                    date_obj = datetime(year, 1, 1)
-                
-                all_dates.append({
-                    'text': date_text,
-                    'date_obj': date_obj,
-                    'start': date_start,
-                    'end': date_end
-                })
-        except Exception as e:
-            return []
-        
-        if not all_dates:
-            return []
-        
-        dates_with_context = []
-        for date_info in all_dates:
-            date_start = date_info['start']
-            date_end = date_info['end']
-            
-            context_start = max(0, date_start - 300)
-            context_end = min(len(text), date_end + 300)
-            context = text[context_start:context_end].lower()
-            context_clean = ' '.join(context.split())
-            
-            if any(keyword in context_clean for keyword in BIRTH_KEYWORDS):
-                dates_with_context.append(date_info)
-        
-        if not dates_with_context:
-            return []
-        
-        if len(dates_with_context) > 1:
-            dates_with_context.sort(key=lambda x: x['date_obj'])
-        
-        return [dates_with_context[0]['text']]
-    
-    # ========================================================================
-    # 7. ФУНКЦИЯ ПОИСКА ЛОКАЦИЙ ПО КЛЮЧЕВЫМ СЛОВАМ
-    # ========================================================================
-    def find_locations_by_keywords(text: str, keywords: list) -> list:
-        if not _NATASHA_INITIALIZED or _NATASHA_NER_TAGGER is None:
-            return []
-        
-        try:
-            from natasha import Doc
-            
-            doc = Doc(text)
-            doc.segment(_NATASHA_SEGMENTER)
-            doc.tag_ner(_NATASHA_NER_TAGGER)
-            
-            locations = []
-            if doc is not None and hasattr(doc, 'spans') and doc.spans is not None:
-                for span in doc.spans:
-                    if span is not None and hasattr(span, 'type') and span.type == "LOC":
-                        try:
-                            locations.append({
-                                'text': text[span.start:span.stop],
-                                'start': span.start,
-                                'stop': span.stop
-                            })
-                        except (IndexError, TypeError):
-                            continue
-            
-            if not locations:
-                return []
-            
-            keyword_positions = []
-            text_lower = text.lower()
-            
-            for keyword in keywords:
-                start = 0
-                while True:
-                    pos = text_lower.find(keyword, start)
-                    if pos == -1:
-                        break
-                    keyword_positions.append({
-                        'keyword': keyword,
-                        'position': pos,
-                        'end': pos + len(keyword)
-                    })
-                    start = pos + 1
-            
-            if not keyword_positions:
-                return []
-            
-            found_places = []
-            for kw in keyword_positions:
-                kw_pos = kw['position']
-                kw_end = kw['end']
-                
-                best_match = None
-                best_distance = float('inf')
-                
-                for loc in locations:
-                    loc_start = loc['start']
-                    loc_end = loc['stop']
-                    
-                    if loc_end < kw_pos:
-                        distance = kw_pos - loc_end
-                    elif loc_start > kw_end:
-                        distance = loc_start - kw_end
-                    else:
-                        distance = 0
-                    
-                    if distance < best_distance:
-                        best_distance = distance
-                        best_match = loc['text']
-                
-                if best_match and best_distance < 500:
-                    found_places.append(best_match)
-            
-            seen = set()
-            unique_places = []
-            for place in found_places:
-                if place not in seen:
-                    seen.add(place)
-                    unique_places.append(place)
-            
-            return unique_places
-            
-        except Exception as e:
-            print(f"Ошибка при поиске локаций: {e}")
-            return []
-    
-    # ========================================================================
-    # 8. ОСНОВНОЙ ЦИКЛ
+    # 8. ОСНОВНОЙ ЦИКЛ ОБРАБОТКИ ДАТАФРЕЙМА
     # ========================================================================
     for idx, row in df.iterrows():
+        # Пропускаем строки с ошибками парсинга
         if str(row["Содержание"]).split(" ")[0] == "Ошибка":
             df.at[idx, "Найденные ПДн"] = "Нет никаких нарушений"
             continue
@@ -1439,7 +1172,28 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
         info_lower = info.lower()
         pd_count = defaultdict(int)
         
-        # Предварительный поиск всех БИК в тексте
+        # ====================================================================
+        # 8.1. ПОИСК "МЯГКИХ" КАТЕГОРИЙ ПО КЛЮЧЕВЫМ СЛОВАМ
+        #      Каждое вхождение ключевого слова увеличивает счётчик на 1
+        # ====================================================================
+        for category_name, compiled_pattern in SOFT_CATEGORIES_COMPILED.items():
+            count = count_soft_matches_fast(info, compiled_pattern)
+            if count > 0:
+                pd_count[category_name] += count
+        
+        # ====================================================================
+        # 8.2. ДОПОЛНИТЕЛЬНЫЙ ПОИСК АДРЕСОВ ПО ПАТТЕРНАМ
+        #      Ищем типичные шаблоны адресов и добавляем к счётчику
+        # ====================================================================
+        address_pattern_count = count_address_patterns_fast(info)
+        if address_pattern_count > 0:
+            pd_count["Адрес"] += address_pattern_count
+        
+        # ====================================================================
+        # 8.3. ПОИСК "ЖЕСТКИХ" ПДн ПО ПАТТЕРНАМ С ВАЛИДАЦИЕЙ
+        # ====================================================================
+        
+        # Предварительный поиск всех БИК в тексте (нужен для валидации счетов)
         found_bics = []
         for match in re.finditer(r'\b\d{9}\b', info):
             bic_candidate = match.group()
@@ -1450,11 +1204,10 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
                     'end': match.end()
                 })
         
-        # ====================================================================
-        # 8.1. ПОИСК ПО РЕГУЛЯРНЫМ ВЫРАЖЕНИЯМ
-        # ====================================================================
+        # Обработка каждого паттерна
         for pattern_name, pattern in patterns.items():
-            text_to_search = info_lower if pattern_name in ["Медицина", "Паспорт", "CVV", "Полис ОМС"] else info
+            # Для некоторых паттернов ищем в нижнем регистре
+            text_to_search = info_lower if pattern_name in ["Паспорт", "CVV", "Полис ОМС"] else info
             
             for match in re.finditer(pattern, text_to_search, re.IGNORECASE):
                 match_text = match.group()
@@ -1462,6 +1215,7 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
                 
                 valid = True
                 
+                # Валидация в зависимости от типа ПДн
                 if pattern_name == "СНИЛС":
                     valid = is_valid_snils(match_text)
                 elif pattern_name == "ИНН":
@@ -1492,78 +1246,15 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
                     pd_count[pattern_name] += 1
         
         # ====================================================================
-        # 8.2. ПОИСК ФИО
-        # ====================================================================
-        names_count = find_person_names(info)
-        if names_count > 0:
-            pd_count["ФИО"] = names_count
-        
-        # ====================================================================
-        # 8.3. ПОИСК ДАТЫ РОЖДЕНИЯ
-        # ====================================================================
-        birth_dates = find_birth_dates(info)
-        if birth_dates:
-            pd_count["Дата рождения"] = len(birth_dates)
-        
-        # ====================================================================
-        # 8.4. ПОИСК МЕСТА РОЖДЕНИЯ
-        # ====================================================================
-        birth_keywords = ["родился", "родилась", "место рождения", "уроженец", "уроженка"]
-        birth_places = find_locations_by_keywords(info, birth_keywords)
-        if birth_places:
-            pd_count["Место рождения"] = len(birth_places)
-        
-        # ====================================================================
-        # 8.5. ПОИСК АДРЕСА РЕГИСТРАЦИИ
-        # ====================================================================
-        address_places = find_locations_by_keywords(info, ADDRESS_KEYWORDS)
-        if address_places:
-            pd_count["Адрес регистрации"] = len(address_places)
-        
-        # ====================================================================
-        # 8.6. ПОИСК ПО NATASHA (словари)
-        # ====================================================================
-        if _NATASHA_INITIALIZED and _NATASHA_NER_TAGGER is not None:
-            try:
-                from natasha import Doc
-                
-                doc = Doc(info)
-                doc.segment(_NATASHA_SEGMENTER)
-                doc.tag_ner(_NATASHA_NER_TAGGER)
-                
-                if doc is not None and _NATASHA_MORPH_VOCAB is not None:
-                    if hasattr(doc, 'tokens') and doc.tokens is not None:
-                        for token in doc.tokens:
-                            if token is not None:
-                                try:
-                                    token.lemmatize(_NATASHA_MORPH_VOCAB)
-                                    lemma = token.lemma.lower() if token.lemma else ""
-                                    word = token.text.lower() if token.text else ""
-                                    
-                                    if lemma in RACE_VALUES or word in RACE_VALUES:
-                                        pd_count["Раса"] += 1
-                                    elif lemma in NATIONALITIES or word in NATIONALITIES:
-                                        pd_count["Национальность"] += 1
-                                    elif lemma in RELIGIONS or word in RELIGIONS:
-                                        pd_count["Религиозные убеждения"] += 1
-                                    elif lemma in POLITICAL_VIEWS or word in POLITICAL_VIEWS:
-                                        pd_count["Политические убеждения"] += 1
-                                    elif lemma in CRIMINAL_WORDS or word in CRIMINAL_WORDS:
-                                        pd_count["Судимость"] += 1
-                                except Exception:
-                                    continue
-            except Exception as e:
-                print(f"Ошибка при обработке Natasha: {e}")
-        
-        # ====================================================================
-        # 8.7. ФОРМИРОВАНИЕ РЕЗУЛЬТАТА
+        # 8.4. ФОРМИРОВАНИЕ РЕЗУЛЬТАТА
+        #      Формат: ПДн1(кол-во),ПДн2(кол-во),...
         # ====================================================================
         if pd_count:
             result_parts = [f"{pd_type}({count})" for pd_type, count in pd_count.items()]
             df.at[idx, "Найденные ПДн"] = ",".join(result_parts)
         else:
             df.at[idx, "Найденные ПДн"] = "Нет никаких нарушений"
-    
+    print(df)
     return df
 
 def categories(df: pd.DataFrame) -> pd.DataFrame:
@@ -1583,8 +1274,7 @@ def categories(df: pd.DataFrame) -> pd.DataFrame:
         "Телефон",
         "Email",
         "Дата рождения",
-        "Место рождения",
-        "Адрес регистрации",
+        "Адрес",  # Объединённая категория: адрес регистрации + место рождения + место проживания
     }
     
     # ========================================================================
@@ -1622,7 +1312,7 @@ def categories(df: pd.DataFrame) -> pd.DataFrame:
     }
     
     # ========================================================================
-    # 5. СПЕЦИАЛЬНЫЕ КАТЕГОРИИ ПДн
+    # 5. СПЕЦИАЛЬНЫЕ КАТЕГОРИИ ПДн (ст. 10 152-ФЗ)
     # ========================================================================
     SPECIAL_CATEGORIES = {
         "Медицина",
@@ -1680,7 +1370,7 @@ def categories(df: pd.DataFrame) -> pd.DataFrame:
             if not item:
                 continue
             
-            # ИСПРАВЛЕНО: добавлены латинские буквы A-Za-z
+            # Извлекаем тип ПДн и количество: "ФИО(3)" -> pd_type="ФИО", count=3
             match = re.match(r'^([A-Za-zА-Яа-я\s:]+)\((\d+)\)$', item)
             if match:
                 pd_type = match.group(1).strip()
