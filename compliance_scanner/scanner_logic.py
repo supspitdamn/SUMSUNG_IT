@@ -16,8 +16,9 @@ import pytesseract
 import polars
 from PIL import Image
 from concurrent.futures import ThreadPoolExecutor
-
-
+import cv2
+import numpy as np
+import re
 import mediapipe as mp
 
 FFMPEG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg.exe")
@@ -60,6 +61,9 @@ def load_bic_directory(xml_path: str = "20260417_ED807_full.xml") -> None:
         print(f"Загружено {len(VALID_BICS)} БИК из справочника")
     except Exception as e:
         print(f"Ошибка загрузки справочника БИК: {e}")
+        
+mp_face_detection = mp.solutions.face_detection
+mp_pose = mp.solutions.pose
 
 
 def is_file_accessible(path: str) -> bool:
@@ -158,6 +162,18 @@ def parsing(df: pd.DataFrame,  update_callback = None) -> None:
             # Группа 3: Текст (через встроенный open)
             ".txt": "text_engine", ".log": "text_engine", ".md": "text_engine", 
             ".xml": "text_engine", ".html": "text_engine", ".htm": "text_engine",
+            ".gif": "image_ocr",
+
+            # JSON (встроенный json)
+            ".json": "json_engine",
+
+            # RTF (через striprtf)
+            ".rtf": "rtf_engine",
+
+            # DOC старый формат
+            ".doc": "doc_engine",
+
+            ".xls": "table_engine",
 
             # Группа 4: Аудио (через Whisper)
             ".mp3": "whisper", ".wav": "whisper", ".m4a": "whisper",
@@ -181,6 +197,120 @@ def parsing(df: pd.DataFrame,  update_callback = None) -> None:
         }
         return cases.get(extension, "skip")
     
+    def _detect_signature(gray) -> bool:
+        """
+        Эвристика: ищем рукописную подпись в нижней трети изображения.
+        Подпись — это вытянутая горизонтально кривая линия, не заполненный прямоугольник.
+        """
+        h, w = gray.shape
+        bottom = gray[int(h * 0.65):, :]
+        if bottom.size == 0:
+            return False
+        _, binary = cv2.threshold(bottom, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for c in contours:
+            x, y, cw, ch = cv2.boundingRect(c)
+            arc = cv2.arcLength(c, False)
+            area = cv2.contourArea(c)
+            if (cw > ch * 1.5
+                    and 30 < cw < w * 0.6
+                    and 5 < ch < h * 0.15
+                    and arc > 50
+                    and area < cw * ch * 0.5):
+                return True
+        return False
+
+    def _detect_fingerprint(gray) -> bool:
+        """
+        Эвристика: детекция отпечатка пальца через Gabor-фильтры.
+        Отпечаток — полосатая текстура с сильным откликом по многим направлениям.
+        """
+        small = cv2.resize(gray, (300, 300))
+        responses = []
+        for theta in np.arange(0, np.pi, np.pi / 8):
+            kernel = cv2.getGaborKernel(
+                (21, 21), sigma=4.0, theta=theta, lambd=8.0, gamma=0.5, psi=0
+            )
+            filtered = cv2.filter2D(small, cv2.CV_8UC3, kernel)
+            responses.append(filtered.mean())
+        return sum(1 for r in responses if r > 30) >= 5
+
+    def detect_biometry(path: str) -> list:
+        """
+        Комбинированная детекция биометрии:
+        - MediaPipe: лицо, глаза, силуэт тела (нейросеть)
+        - OpenCV: подпись и отпечаток пальца (эвристики)
+        Возвращает список найденных типов: ["лицо (2)", "глаза", "подпись"]
+        """
+        img = cv2.imread(path)
+        if img is None:
+            return []
+
+        found = []
+        rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+        # Лицо + глаза (MediaPipe Face Detection)
+        try:
+            with mp_face_detection.FaceDetection(
+                model_selection=1, min_detection_confidence=0.5
+            ) as detector:
+                results = detector.process(rgb)
+                if results.detections:
+                    found.append(f"лицо ({len(results.detections)})")
+                    for det in results.detections:
+                        kp = det.location_data.relative_keypoints
+                        if len(kp) >= 2:  # правый глаз + левый глаз
+                            found.append("глаза")
+                            break
+        except Exception:
+            pass
+
+        # Силуэт тела (MediaPipe Pose)
+        try:
+            with mp_pose.Pose(
+                static_image_mode=True, min_detection_confidence=0.5
+            ) as pose:
+                if pose.process(rgb).pose_landmarks:
+                    found.append("силуэт тела")
+        except Exception:
+            pass
+
+        # Подпись (OpenCV эвристика контуров)
+        try:
+            if _detect_signature(gray):
+                found.append("подпись")
+        except Exception:
+            pass
+
+        # Отпечаток пальца (OpenCV Gabor-фильтры)
+        try:
+            if _detect_fingerprint(gray):
+                found.append("отпечаток пальца")
+        except Exception:
+            pass
+
+        return found
+
+    def extract_binary(path: str, min_length: int = 6) -> str:
+        """
+        Извлекает читаемые ASCII-строки из бинарного файла.
+        Нужно для поиска ПДн внутри .doc и других бинарников.
+        """
+        try:
+            with open(path, "rb") as f:
+                raw = f.read()
+            ascii_strings = re.findall(rb'[ -~]{%d,}' % min_length, raw)
+            result = []
+            for s in ascii_strings:
+                try:
+                    result.append(s.decode("ascii"))
+                except Exception:
+                    pass
+            return "\n".join(result) if result else "БИНАРНИК: ЧИТАЕМЫХ СТРОК НЕ НАЙДЕНО"
+        except Exception as e:
+            return f"Ошибка бинарника: {e}"
+        
     audio_model = whisper.load_model("base")
 
     size = len(df)
@@ -198,7 +328,60 @@ def parsing(df: pd.DataFrame,  update_callback = None) -> None:
             df.at[idx, "Содержание"] = "ПУСТОЙ ФАЙЛ" if os.path.getsize(path) == 0 else "НЕТ ДОСТУПА"
             continue
 
-        if engine == "pdf_engine":
+        if engine == "json_engine":
+            try:
+                import json
+                with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                    data = json.load(f)
+
+                def flatten_json(obj, prefix=""):
+                    """Рекурсивно разворачиваем JSON в плоский текст"""
+                    parts = []
+                    if isinstance(obj, dict):
+                        for k, v in obj.items():
+                            parts.extend(flatten_json(v, f"{prefix}{k}: "))
+                    elif isinstance(obj, list):
+                        for item in obj:
+                            parts.extend(flatten_json(item, prefix))
+                    else:
+                        parts.append(f"{prefix}{obj}")
+                    return parts
+
+                lines = flatten_json(data)
+                text = "\n".join(str(l) for l in lines)
+                df.at[idx, "Содержание"] = text.strip() if text.strip() else "ПУСТОЙ JSON"
+            except Exception as e:
+                df.at[idx, "Содержание"] = f"Ошибка JSON: {e}"
+
+        elif engine == "rtf_engine":
+            try:
+                from striprtf.striprtf import rtf_to_text
+                with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                    raw = f.read()
+                text = rtf_to_text(raw)
+                df.at[idx, "Содержание"] = text.strip() if text.strip() else "ПУСТОЙ RTF"
+            except Exception as e:
+                df.at[idx, "Содержание"] = f"Ошибка RTF: {e}"
+
+        elif engine == "doc_engine":
+            try:
+                # Пробуем через antiword (если установлен)
+                result = subprocess.run(
+                    ["antiword", path], capture_output=True, text=True, timeout=30
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    df.at[idx, "Содержание"] = result.stdout.strip()
+                else:
+                    # Fallback: читаем как бинарник, ищем текстовые строки
+                    df.at[idx, "Содержание"] = extract_binary(path)
+            except FileNotFoundError:
+                # antiword не установлен — читаем как бинарник
+                df.at[idx, "Содержание"] = extract_binary(path)
+            except Exception as e:
+                df.at[idx, "Содержание"] = f"Ошибка DOC: {e}"
+
+
+        elif engine == "pdf_engine":
             try:
                 with fitz.open(path) as doc:
                     text = ""
@@ -216,6 +399,19 @@ def parsing(df: pd.DataFrame,  update_callback = None) -> None:
                         with ThreadPoolExecutor(max_workers=4) as pool:
                             results = list(pool.map(ocr_page, doc))
                         text = "\n\n".join(r.strip() for r in results if r.strip())
+                    bio_found = []
+                    for page_num, page in enumerate(doc):
+                        pix = page.get_pixmap(matrix=fitz.Matrix(150/72, 150/72))
+                        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                            tmp.write(pix.tobytes("png"))
+                            tmp_path = tmp.name
+                        bio = detect_biometry(tmp_path)
+                        if bio:
+                            bio_found.append(f"[БИОМЕТРИЯ стр.{page_num+1}: {', '.join(bio)}]")
+                        os.unlink(tmp_path)
+
+                    if bio_found:
+                        text += "\n" + "\n".join(bio_found)
 
                     df.at[idx, "Содержание"] = text.strip() if text.strip() else "ПУСТОЙ ПДФ"
             except Exception as e:
@@ -251,9 +447,14 @@ def parsing(df: pd.DataFrame,  update_callback = None) -> None:
                 detected_language = max(probs, key=probs.get)
 
                 result = audio_model.transcribe(path, language = detected_language)
+                
+                text = result["text"].strip() if result else ""
+                if text:
+                    text += "\n[БИОМЕТРИЯ: образец голоса]"
+                    df.at[idx, "Содержание"] = text
+                else:
+                    df.at[idx, "Содержание"] = "НИЧЕГО НЕ ИЗВЛЕЧЕНО"
 
-                df.at[idx, "Содержание"] = result["text"].strip() if result else "НИЧЕГО НЕ ИЗВЛЕЧЕНО"
-            
             except Exception as e:
 
                 print(f"Произошел сбой при извлечении аудиодорожки: {e}")
@@ -266,6 +467,11 @@ def parsing(df: pd.DataFrame,  update_callback = None) -> None:
                 if img.mode not in ("L", "RGB"):
                     img = img.convert("RGB")
                 text = pytesseract.image_to_string(img, lang="rus+eng")
+                
+                bio = detect_biometry(path)
+                if bio:
+                    text += f"\n[БИОМЕТРИЯ: {', '.join(bio)}]"
+
                 df.at[idx, "Содержание"] = text.strip() if text.strip() else "OCR НЕ ИЗВЛЁК ТЕКСТ"
             except Exception as e:
                 df.at[idx, "Содержание"] = f"Ошибка OCR: {e}"
@@ -294,6 +500,8 @@ def parsing(df: pd.DataFrame,  update_callback = None) -> None:
                     res = audio_model.transcribe(tmp_audio, language=lang)
                     if res["text"].strip():
                         results.append(res["text"].strip())
+                        results.append("[БИОМЕТРИЯ: образец голоса]")  # ДОБАВИТЬ
+
                 os.unlink(tmp_audio)
 
                 # кадры OCR
@@ -313,6 +521,10 @@ def parsing(df: pd.DataFrame,  update_callback = None) -> None:
                         if t.strip() and t.strip() != prev:
                             results.append(t.strip())
                             prev = t.strip()
+                        frame_path = os.path.join(tmpdir, f)
+                        bio = detect_biometry(frame_path)
+                        if bio:
+                            results.append(f"[БИОМЕТРИЯ кадр {f}: {', '.join(bio)}]")
 
                 df.at[idx, "Содержание"] = "\n".join(results) if results else "ВИДЕО: ТЕКСТ НЕ ИЗВЛЕЧЁН"
             except Exception as e:

@@ -12,6 +12,7 @@ python-docx==1.1.0       # Для доксов
 openpyxl>=3.1            # .xlsx файлы
 xlrd>=2.0                # .xls файлы
 polars >= 1.0.0
+striprtf>=0.0.26         # .rtf
 
 # OCR & Images
 pytesseract==0.3.10
