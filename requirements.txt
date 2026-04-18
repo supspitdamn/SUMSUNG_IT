@@ -28,6 +28,7 @@ openpyxl
 ultralytics
 huggingface_hub
 transformers
+SentencePiece
 
 ### Вспомогательные
 typing-extensions    # Поддержка типов (Optional, List)
