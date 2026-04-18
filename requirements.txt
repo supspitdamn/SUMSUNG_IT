@@ -1,0 +1,36 @@
+# Web & API
+fastapi==0.110.0         # Сам наш апи
+uvicorn[standard]==0.27.1 # Дает ASGI-сервер. Для чтения порта и принятие запросов
+pydantic==2.6.3
+
+# Data
+pandas==2.2.1
+
+# Document Parsing
+pymupdf==1.23.26         # Для пдфки
+python-docx==1.1.0       # Для доксов
+openpyxl>=3.1            # .xlsx файлы
+xlrd>=2.0                # .xls файлы
+polars >= 1.0.0
+
+# OCR & Images
+pytesseract==0.3.10
+Pillow==10.2.0
+
+# AI & Audio
+openai-whisper==20231117
+torch                    
+numpy<2.0.0
+
+# Utilities
+python-dotenv==1.0.1
+
+# Биометерия
+opencv-python>=4.9
+mediapipe>=0.10.9
+
+# frontend
+streamlit==1.32.0
+requests==2.31.0
+matplotlib
+

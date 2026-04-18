@@ -1,0 +1,150 @@
+import streamlit as st
+import requests
+import pandas as pd
+import matplotlib.pyplot as plt
+import time
+
+st.set_page_config(page_title="152-ФЗ Сканер", layout="wide")
+BASE_URL = "http://127.0.0.1:8000" # Адрес сервера с АПИ
+
+if 'scan_finished' not in st.session_state: 
+    st.session_state['scan_finished'] = False 
+if 'show_full_report' not in st.session_state:
+    st.session_state['show_full_report'] = False
+
+# Две данные переменные хранят информацию о состояниях кнопок. В стримлит файл app.py
+# Каждый раз перезапускается системой при любом изменении
+
+st.title("Система анализа базы данных на предмет нарушений №152-ФЗ")
+st.markdown("---")
+
+st.sidebar.header("Настройки") # Заголовок левого окошка
+path_to_scan = st.sidebar.text_input("Путь к папке:", placeholder="C:/Data")
+start_button = st.sidebar.button("Запустить анализ", type="primary") # Кнопка, меняющая состояние
+
+st.sidebar.markdown("---")
+if st.sidebar.button(label="Получить подробный отчет"):
+    st.session_state['show_full_report'] = not st.session_state['show_full_report'] # Простая инверсия состояния
+
+if start_button: # Сама кнопка возвращает True или False
+    st.session_state['scan_finished'] = False 
+    st.session_state['show_full_report'] = False
+    # Две предыдущие строки выполняются для того, чтобы убрать с экрана предыдущие результаты
+    # Это также подготовка к новым данным
+
+    if path_to_scan: # Сканирование работает только если есть путь
+        try:
+            res = requests.post(f"{BASE_URL}/scan", params={"path": path_to_scan}) # Обращаемся к АПИ с запросом по сканированию
+            if res.status_code == 200: # По протоколу HTTP этот код значит успешность принятия запроса
+                task_id = res.json().get("task_id") # Получаем айди задания
+                with st.status("Идет анализ...", expanded=True) as status:
+                    while True: 
+                        check = requests.get(f"{BASE_URL}/result/{task_id}").json() # В цикле происходит опрос АПИ по состоянию задания
+                        if check.get("Статус") == "выполнено": # выходим из цикла по выполнении
+                            status.update(label="Готово!", state="complete", expanded=False)
+                            st.session_state['scan_finished'] = True
+                            st.rerun() # По сути перезапускаем скрипт заново. Так, теперь у нас scan_finished = True и кнопка не нажата
+                            #будет просто визуализирована информация
+                            break
+                        time.sleep(1)
+        except Exception as e:
+            st.error(f"Ошибка связи: {e}")
+
+if st.session_state['scan_finished']: # Сканирование завершено - выводим базовую информацию
+    st.subheader("Краткая сводка")
+    try:
+        response = requests.get(f"{BASE_URL}/db_quite_pull") # снова отправляем запрос к АПИ - по короткой сводке
+        quite_res = response.json() # переводим в джсончик
+        
+        if quite_res: # Если возвращен объект не типа None, то идем дальше
+            data = quite_res[0] if isinstance(quite_res, list) else quite_res # предостережение излишне
+            # Берем первый элемент массива (который в теории является словарем) иначе просто сам результат - словарь
+            col1, col2, col3 = st.columns(3) # формирование колонок
+            col1.metric("Просканировано", f"{data.get('Просканированно', 0)} шт.") # Получаем ответ в формате QuitePull - подаставляем
+            col2.metric("Макс. рейтинг", f"{data.get('Высшая_степень_опасности', 0):.1f}") # Получаем ответ в формате QuitePull - подаставляем
+            
+            danger_file = data.get('Самый_опасный_файл', 'Нет') # Получаем ответ в формате QuitePull - подаставляем
+            short_file = str(danger_file).replace('\\', '/').split('/')[-1] 
+            col3.metric("Самый опасный", short_file) # Получаем ответ в формате QuitePull - подаставляем
+
+            if data.get('Детали'):
+                st.info(f"**Детали анализа:** {data.get('Детали')}")
+        
+        st.divider() # Визуально отделяем от следующей части
+        st.subheader("Критические угрозы") 
+        
+        results = requests.get(f"{BASE_URL}/db_results").json() # Получаем полную БД
+        df = pd.DataFrame(results) # Представляем в виде pandas df
+
+        if not df.empty: 
+            col_name = "Рейтинг опасности" if "Рейтинг опасности" in df.columns else "Рейтинг_опасности"
+            top_10 = df.sort_values(by=col_name, ascending=True).tail(10)
+            
+            fig, ax = plt.subplots(figsize=(10, 6))
+            display_names = top_10['Имя файла'].apply(lambda x: str(x).replace('\\', '/').split('/')[-1])
+            
+            bars = ax.barh(display_names, top_10[col_name], color="r")
+            ax.set_xlabel('Уровень опасности')
+            ax.grid(axis='x', linestyle='--', alpha=0.7)
+            
+            for bar in bars:
+                ax.text(bar.get_width() + 0.1, bar.get_y() + bar.get_height()/2, 
+                        f'{bar.get_width():.1f}', va='center')
+            st.pyplot(fig)
+            plt.close(fig)
+    except Exception as e:
+        st.error(f"Ошибка отображения данных: {e}")
+    
+    # ПАЙЧАРТ
+    st.subheader("Соотношение типов ПДн")
+    try:
+
+        expanded_types = df['Найденные ПДн'].str.split(',').explode().str.strip()
+        
+        # Теперь считаем чистые уникальные типы
+        type_counts = expanded_types.value_counts() 
+
+        fig2, ax2 = plt.subplots(figsize=(8, 6))
+        
+        ax2.pie(
+            type_counts, 
+            labels=type_counts.index, 
+            autopct='%1.1f%%', 
+            startangle=90, 
+            colors=plt.cm.Pastel1.colors,
+            wedgeprops={'edgecolor': 'white'}
+        )
+        ax2.axis('equal') 
+
+        st.pyplot(fig2)
+        plt.close(fig2)
+        
+    except Exception as e:
+        st.info(f"Круговая диаграмма не построена. Детали: {e}")
+
+
+
+if st.session_state['show_full_report']: 
+    st.divider()    
+    st.title("Подробный отчет")
+    try:
+        response = requests.get(f"{BASE_URL}/db_results") 
+        full_info = response.json() 
+        if full_info:
+
+            df_report = pd.DataFrame(full_info)
+
+            st.dataframe(data=df_report, use_container_width=True) 
+
+            csv_file = df_report.to_csv(index=False).encode('utf-8-sig')
+            
+            st.download_button(
+                label="Скачать .CSV",
+                data=csv_file,
+                file_name='report_152_fz.csv',
+                mime='text/csv',
+            )
+        else:
+            st.info("Нет данных для отображения.")
+    except Exception as e:
+        st.error(f"Ошибка загрузки таблицы: {e}")
