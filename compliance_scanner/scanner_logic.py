@@ -1850,7 +1850,6 @@ def evaluate_violations(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 ### Главная функция
-### Главная функция
 def run_scanning(path: str, update_callback = None)->pd.DataFrame:
 
     """
@@ -1914,7 +1913,3 @@ def run_scanning(path: str, update_callback = None)->pd.DataFrame:
     print(f"\nОБЩЕЕ ВРЕМЯ РАБОТЫ: {round(total_time, 2)} сек.")
     
     return evaluated_df
-
-name = "C:\Hacaton\dataTest"
-result = run_scanning(name)
-print(result)
