@@ -624,205 +624,100 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
         return total % 10 == 0
     
     # ========================================================================
-    # 5. ФУНКЦИЯ ПОИСКА ФИО ЧЕРЕЗ NATASHA
+    # ФУНКЦИЯ ПОИСКА ФИО ПО МАРКЕРАМ
     # ========================================================================
-    def find_person_names(text: str, file_path: str = "") -> int:
+    def find_person_names_by_markers(text: str, file_path: str = "") -> int:
         """
-        Ищет ФИО в тексте с помощью Natasha.
-        Фильтрует организации, города, служебные пометки.
-        Объединяет разрозненные части одного ФИО.
-        Удаляет дубликаты.
-        Возвращает количество уникальных ФИО.
+        Ищет ФИО по ключевым словам-маркерам.
+        Берёт текст после маркера и проверяет что это не организация.
         """
-        if not _NATASHA_INITIALIZED or _NATASHA_NER_TAGGER is None:
-            return 0
+        import re
         
-        try:
-            from natasha import Doc
+        print(f"\n[ФИО МАРКЕРЫ DEBUG] Файл: {file_path}")
+        
+        # Нормализуем текст
+        text = re.sub(r'[\n\r\t\|]+', ' ', text)
+        text = re.sub(r'\s+', ' ', text)
+        text_lower = text.lower()
+        
+        found_names = set()
+        
+        for marker in FIO_MARKERS:
+            marker_lower = marker.lower()
+            start_pos = 0
             
-            # Заменяем переносы строк и табуляции на пробелы
-            normalized_text = re.sub(r'[\n\r\t]+', ' ', text)
-            normalized_text = re.sub(r'\s+', ' ', normalized_text)
-            
-            doc = Doc(normalized_text)
-            doc.segment(_NATASHA_SEGMENTER)
-            doc.tag_ner(_NATASHA_NER_TAGGER)
-            
-            raw_names = []
-            
-            # Слова и паттерны, которые НЕ являются ФИО
-            NOT_NAME_PATTERNS = [
-                r'^[А-ЯЁ]\.\s*[А-ЯЁ]\.$',  # И.О.
-                r'^[А-ЯЁ]\.[А-ЯЁ]\.$',     # И.О.
-                r'^м\.п\.?$',              # М.П.
-                r'^подпись',               # Подпись
-                r'^расшифровка',           # Расшифровка
-                r'^фамилия$',              # Фамилия
-                r'^имя$',                  # Имя
-                r'^отчество$',             # Отчество
-                r'^пол\s',                 # Пол мужской/женский
-                r'^г\.\s',                 # г. Город
-                r'^город\s',               # Город
-            ]
-            
-            # Слова, которые указывают что это не ФИО
-            NOT_NAME_WORDS = {
-                'инженер', 'конструктор', 'менеджер', 'директор', 'руководитель',
-                'специалист', 'администратор', 'оператор', 'техник', 'программист',
-                'аналитик', 'бухгалтер', 'экономист', 'юрист', 'секретарь',
-                'solidworks', 'autodesk', 'inventor', 'microsoft', 'google',
-                'подпись', 'расшифровка', 'фамилия', 'отчество',
-            }
-            
-            if doc is not None and hasattr(doc, 'spans') and doc.spans is not None:
-                for span in doc.spans:
-                    if span is not None and hasattr(span, 'type') and span.type == "PER":
-                        name_text = normalized_text[span.start:span.stop].strip()
-                        name_lower = name_text.lower()
-                        
-                        # Проверяем на паттерны "не ФИО"
-                        is_not_name = False
-                        for pattern in NOT_NAME_PATTERNS:
-                            if re.match(pattern, name_lower, re.IGNORECASE):
-                                is_not_name = True
+            while True:
+                pos = text_lower.find(marker_lower, start_pos)
+                if pos == -1:
+                    break
+                
+                # Берём текст после маркера (до 150 символов)
+                after_start = pos + len(marker)
+                after_text = text[after_start:after_start + 150]
+                
+                # Пытаемся извлечь ФИО
+                name_candidate = None
+                
+                # 1. После двоеточия
+                colon_match = re.search(r'[:=]\s*([А-ЯЁA-Z][А-ЯЁA-Z\s\-\.]{3,80}?)(?:[,;.\n]|$)', after_text, re.IGNORECASE)
+                if colon_match:
+                    name_candidate = colon_match.group(1).strip()
+                
+                # 2. Просто слова с заглавной буквы подряд
+                if not name_candidate:
+                    words = after_text.strip().split()
+                    name_parts = []
+                    for word in words[:6]:  # максимум 6 слов
+                        # Проверяем что слово начинается с заглавной или всё капсом (для сканов)
+                        if re.match(r'^[А-ЯЁA-Z]', word) or word.isupper():
+                            # Очищаем от мусора
+                            clean_word = re.sub(r'[^\w\-\.]', '', word)
+                            if len(clean_word) > 1:
+                                name_parts.append(clean_word)
+                        else:
+                            if name_parts:
                                 break
-                        
-                        if is_not_name:
-                            print(f"[ФИО DEBUG]   -> Отфильтровано по паттерну: '{name_text}'")
-                            continue
-                        
-                        # Проверяем на слова "не ФИО"
-                        words = name_lower.split()
-                        has_not_name_word = any(word in NOT_NAME_WORDS for word in words)
-                        if has_not_name_word:
-                            print(f"[ФИО DEBUG]   -> Отфильтровано по словарю: '{name_text}'")
-                            continue
-                        
-                        # Проверяем что ФИО содержит хотя бы одно слово с заглавной буквы (не все капсом)
-                        # Это отсеет "ПОЛ МУЖСКОЙ", "М.П." и т.д.
-                        if name_text.isupper() and len(words) <= 2:
-                            # Если всё капсом и короткое - скорее всего не ФИО
-                            print(f"[ФИО DEBUG]   -> Отфильтровано (всё капсом): '{name_text}'")
-                            continue
-                        
-                        # Проверяем контекст на организации и юр.лица
-                        context_start = max(0, span.start - 150)
-                        context_end = min(len(normalized_text), span.stop + 50)
-                        context = normalized_text[context_start:context_end].lower()
-                        
-                        is_org = False
-                        for marker in ORGANIZATION_MARKERS:
-                            if marker in context:
-                                is_org = True
-                                break
-                        
-                        if is_org:
-                            print(f"[ФИО DEBUG]   -> Отфильтровано (организация в контексте): '{name_text}'")
-                            continue
-                        
-                        raw_names.append({
-                            'text': name_text,
-                            'start': span.start,
-                            'end': span.stop,
-                            'words': set(name_text.lower().split())
-                        })
-            
-            # Логирование сырых найденных PER
-            if raw_names:
-                print(f"\n[ФИО DEBUG] Файл: {file_path}")
-                print(f"[ФИО DEBUG] Сырые PER от Natasha после фильтрации ({len(raw_names)} шт.):")
-                for i, name in enumerate(raw_names):
-                    print(f"  {i+1}. '{name['text']}' (позиция: {name['start']}-{name['end']})")
-            
-            if not raw_names:
-                print(f"[ФИО DEBUG] Файл: {file_path}")
-                print(f"[ФИО DEBUG] ФИО не найдены\n")
-                return 0
-            
-            # Группируем имена, которые являются частями одного ФИО
-            merged_names = []
-            used = set()
-            
-            for i, name1 in enumerate(raw_names):
-                if i in used:
-                    continue
                     
-                merged_text = name1['text']
-                merged_start = name1['start']
-                merged_end = name1['end']
-                merged_words = name1['words'].copy()
+                    if len(name_parts) >= 2:
+                        name_candidate = ' '.join(name_parts[:4])  # максимум 4 слова
                 
-                # Ищем другие части этого же ФИО
-                for j, name2 in enumerate(raw_names[i+1:], i+1):
-                    if j in used:
-                        continue
+                # Проверяем кандидата
+                if name_candidate:
+                    name_candidate = name_candidate.strip()
+                    name_lower = name_candidate.lower()
                     
-                    # Если имена находятся близко (в пределах 100 символов)
-                    distance = min(abs(name2['start'] - merged_end), abs(merged_start - name2['end']))
+                    # Фильтруем явно не ФИО
+                    bad_words = ["ооо", "оао", "зао", "пао", "ао", "ип", "компания", "организация",
+                                "учреждение", "банк", "отдел", "управление", "департамент", "министерство",
+                                "м.п.", "м п", "подпись", "расшифровка", "фамилия", "имя", "отчество"]
                     
-                    if distance < 100:
-                        # Проверяем, не пересекаются ли слова
-                        if not merged_words.intersection(name2['words']):
-                            # Объединяем тексты
-                            if name2['start'] < merged_start:
-                                merged_text = name2['text'] + ' ' + merged_text
-                                merged_start = name2['start']
-                            else:
-                                merged_text = merged_text + ' ' + name2['text']
-                            
-                            merged_end = max(merged_end, name2['end'])
-                            merged_words.update(name2['words'])
-                            used.add(j)
-                            print(f"[ФИО DEBUG]   -> Объединено с '{name2['text']}' (расстояние: {distance})")
+                    if not any(bad in name_lower for bad in bad_words):
+                        if len(name_candidate) > 5:
+                            found_names.add(name_candidate)
+                            print(f"[ФИО МАРКЕРЫ DEBUG]   ✓ '{marker}' → '{name_candidate}'")
                 
-                used.add(i)
-                merged_names.append(merged_text)
-            
-            if merged_names:
-                print(f"[ФИО DEBUG] После объединения ({len(merged_names)} шт.):")
-                for i, name in enumerate(merged_names):
-                    print(f"  {i+1}. '{name}'")
-            
-            # Удаляем дубликаты и фильтруем одиночные слова
-            unique_names = set()
-            for name in merged_names:
-                normalized_name = ' '.join(name.lower().split())
-                words = normalized_name.split()
-                
-                # Оставляем только если минимум 2 слова
-                if len(words) >= 2:
-                    # Дополнительная проверка: слова должны быть кириллицей
-                    if all(re.match(r'^[а-яё-]+$', word) for word in words):
-                        unique_names.add(normalized_name)
-                    else:
-                        print(f"[ФИО DEBUG]   -> Отфильтровано (не кириллица): '{name}'")
-                else:
-                    print(f"[ФИО DEBUG]   -> Отфильтровано (одно слово): '{name}'")
-            
-            # Финальная проверка: удаляем имена, которые являются частью более полных
-            final_names = set()
-            names_list = sorted(list(unique_names), key=len, reverse=True)
-            
-            for name in names_list:
-                is_subset = False
-                for longer_name in final_names:
-                    if name in longer_name:
-                        is_subset = True
-                        print(f"[ФИО DEBUG]   -> Удалено '{name}' (часть '{longer_name}')")
-                        break
-                if not is_subset:
-                    final_names.add(name)
-            
-            print(f"[ФИО DEBUG] Итоговые ФИО ({len(final_names)} шт.):")
-            for i, name in enumerate(sorted(final_names)):
-                print(f"  {i+1}. '{name}'")
-            print()
-            
-            return len(final_names)
-            
-        except Exception as e:
-            print(f"Ошибка при поиске ФИО: {e}")
-            return 0
+                start_pos = pos + len(marker)
+        
+        # Убираем дубликаты и подмножества
+        final_names = set()
+        sorted_names = sorted(list(found_names), key=len, reverse=True)
+        
+        for name in sorted_names:
+            is_subset = False
+            for longer in final_names:
+                if name.lower() in longer.lower():
+                    print(f"[ФИО МАРКЕРЫ DEBUG]   → Удалено '{name}' (часть '{longer}')")
+                    is_subset = True
+                    break
+            if not is_subset:
+                final_names.add(name)
+        
+        print(f"[ФИО МАРКЕРЫ DEBUG] ИТОГО: {len(final_names)} шт.")
+        for name in sorted(final_names):
+            print(f"    - {name}")
+        print()
+        
+        return len(final_names)
     
     # ========================================================================
     # 6. ФУНКЦИЯ ПРОВЕРКИ ДАТЫ РОЖДЕНИЯ
