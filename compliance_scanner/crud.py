@@ -34,7 +34,7 @@ def get_all_results() -> list:
     try:
         queue = """
                     SELECT
-                        *
+\                       *
                     FROM
                         scan_results
                     ORDER BY
