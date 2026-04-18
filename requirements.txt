@@ -29,6 +29,7 @@ ultralytics
 huggingface_hub
 transformers
 SentencePiece
+natasha
 
 ### Вспомогательные
 typing-extensions    # Поддержка типов (Optional, List)
