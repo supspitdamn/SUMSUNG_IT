@@ -102,7 +102,7 @@ def forming_table(root_dir: str = ".//") -> pd.DataFrame:
 
     return df
 
-def parsing(df: pd.DataFrame) -> None:
+def parsing(df: pd.DataFrame,  update_callback = None) -> None:
     """
     функция parsing принимает на вход таблицу в pandas и возвращает измененный датафрейм.
     в функции парсинг есть вложенная служебная функция choose_engine, принимающая
@@ -150,7 +150,8 @@ def parsing(df: pd.DataFrame) -> None:
     audio_model = whisper.load_model("base")
 
     for idx, row in df.iterrows():
-
+        if update_callback:
+            update_callback(str(row["Имя файла"] + str(row["Расширение"])))
         path = row["Путь"]
         path = os.path.normpath(path=path)
         ext = row["Расширение"]
@@ -586,7 +587,7 @@ def evaluate_violations(df: pd.DataFrame) -> pd.DataFrame:
     7-8    - высокая опасность (паспорт один, зарплата+ФИО, медицина+ФИО)
     9-10   - критическая опасность (паспорт+телефон, ФИО+СНИЛС, медицина+паспорт)
     """
-    
+    df = df.copy()
     from itertools import combinations
     
     # ========================================================================
@@ -720,7 +721,7 @@ def evaluate_violations(df: pd.DataFrame) -> pd.DataFrame:
     
     return df
 
-def run_scanning(path: str)->pd.DataFrame:
+def run_scanning(path: str, update_callback = None)->pd.DataFrame:
 
     """
     Функция для запуска полного сканнирования хранилища.
@@ -735,16 +736,19 @@ def run_scanning(path: str)->pd.DataFrame:
     df = forming_table(root_dir=root_dir)
     time_step1 = time.time()
     print(f"Время извлечения метаданных: {round(time_step1 - start_time, 2)} сек.")
+    print(df)
 
     # --- Шаг 2 ---
-    extracted_df = parsing(df) 
+    extracted_df = parsing(df, update_callback=update_callback) 
     time_step2 = time.time()
     print(f"Время парсинга информации: {round(time_step2 - time_step1, 2)} сек.")
+    print(extracted_df)
 
     # --- Шаг 3 ---
     found_danger_df = seek_danger(extracted_df) 
     time_step3 = time.time()
     print(f"Время анализа по №152-ФЗ: {round(time_step3 - time_step2, 2)} сек.")
+    print(found_danger_df)
 
     # Итог
     evaluated_df = evaluate_violations(found_danger_df)
@@ -753,7 +757,8 @@ def run_scanning(path: str)->pd.DataFrame:
 
     try:
         conn = sqlite3.connect("DataBase.db")
-        found_danger_df.to_sql("database", con = conn, if_exists = "replace")
+        evaluated_df.to_sql("scan_results", con = conn, if_exists = "replace")
+        print("Успешно создана база данных")
 
     except Exception as e:
 
