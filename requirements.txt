@@ -25,6 +25,9 @@ mediapipe            # Детекция лиц/объектов
 striprtf             # Чтение RTF файлов
 tabulate             # Конвертация DF в Markdown таблицы
 openpyxl
+ultralytics
+huggingface_hub
+transformers
 
 ### Вспомогательные
 typing-extensions    # Поддержка типов (Optional, List)
