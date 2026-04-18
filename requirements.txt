@@ -24,6 +24,7 @@ opencv-python        # Обработка кадров видео
 mediapipe            # Детекция лиц/объектов
 striprtf             # Чтение RTF файлов
 tabulate             # Конвертация DF в Markdown таблицы
+openpyxl
 
 ### Вспомогательные
 typing-extensions    # Поддержка типов (Optional, List)
