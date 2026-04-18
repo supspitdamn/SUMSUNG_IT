@@ -87,16 +87,26 @@ if start_button: # Сама кнопка возвращает True или False
         try:
             res = requests.post(f"{BASE_URL}/scan", params={"path": path_to_scan}) # Обращаемся к АПИ с запросом по сканированию
             if res.status_code == 200: # По протоколу HTTP этот код значит успешность принятия запроса
+
                 task_id = res.json().get("task_id") # Получаем айди задания
+                file_logger = st.empty()
+
                 with st.status("Идет анализ...", expanded=True) as status:
+
                     while True: 
                         check = requests.get(f"{BASE_URL}/result/{task_id}").json() # В цикле происходит опрос АПИ по состоянию задания
+                        current_file = check.get("current_file", "Подготовка...")
+                        file_logger.write(f"📁 **Обработка:** {current_file}")
+
                         if check.get("Статус") == "выполнено": # выходим из цикла по выполнении
                             status.update(label="Готово!", state="complete", expanded=False)
                             st.session_state['scan_finished'] = True
                             st.rerun() # По сути перезапускаем скрипт заново. Так, теперь у нас scan_finished = True и кнопка не нажата
                             #будет просто визуализирована информация
                             break
+
+                        time.sleep(0.5)
+
                         time.sleep(1)
         except Exception as e:
             st.error(f"Ошибка связи: {e}")
