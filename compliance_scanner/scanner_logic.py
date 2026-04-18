@@ -21,6 +21,8 @@ import numpy as np
 import re
 import mediapipe as mp
 
+from striprtf.striprtf import rtf_to_text
+
 FFMPEG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg.exe")
 FFPROBE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffprobe.exe")
 pytesseract.pytesseract.tesseract_cmd = os.path.join(
@@ -355,7 +357,6 @@ def parsing(df: pd.DataFrame,  update_callback = None) -> None:
 
         elif engine == "rtf_engine":
             try:
-                from striprtf.striprtf import rtf_to_text
                 with open(path, "r", encoding="utf-8", errors="ignore") as f:
                     raw = f.read()
                 text = rtf_to_text(raw)
