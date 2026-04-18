@@ -9,12 +9,12 @@ from compliance_scanner.scanner_logic import run_scanning
 
 # для запуска и тестирования в консоли пишем: pyhton -m uvicorn compliance_scanner.main:app --reload
 
-tasks = {}
+tasks = {} # Словарь задач
 
 ###
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI): # вызывается при запуске сервера и его кончине
     """
     Функция запускается при начале работы программы
     и формирует базу данных, если таковой еще нет,
@@ -31,13 +31,15 @@ app = FastAPI(
     title="Сканнер на предмет нарушений №152-ФЗ",
       lifespan=lifespan)
 
-@app.get("/")
-async def root():
-    return {"message": "Сервер сканирования ПДн запущен. Перейдите на /docs для работы."}
+###
 
-
-@app.post("/scan", response_model=schemas.ScanStatus)
+@app.post("/scan", response_model=schemas.ScanStatus)  # Пост, так как мы инициируем создание таблицы
 async def start_scan(path: str, background_tasks: BackgroundTasks):
+    """
+    Асинхронная функция принимает на вход путь в виде строки и аргумент фоновых задач.
+    ВТОРОЙ АРГУМЕНТ НЕ ЗАДАВАТЬ! Выполняет очистку предыдущей таблицы и запускает фоновую
+    задачу. Возвращает информацию о задаче в виде словаря
+    """
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="Такого пути нет")
     
@@ -64,7 +66,7 @@ async def start_scan(path: str, background_tasks: BackgroundTasks):
 
 ###
 
-def perform_analysis(task_id: str, path: str) -> None:
+def perform_analysis(task_id: str, path: str) -> None: # Функция выполняется в фоновом режиме. Вспомогательная
     """
     Функция принимает на вход ID задания и путь для сканирования.
     Запускается импортированная функция из scanner_logic.py для
@@ -91,7 +93,7 @@ def perform_analysis(task_id: str, path: str) -> None:
 ###
 
 @app.get("/result/{task_id}")
-async def get_results(task_id: str) -> dict:
+async def get_results(task_id: str) -> dict: # Метод get, так как запрашиваем 
     """
     Функция по айдишнику возвращает пользователю ответ на его запрос
     """
@@ -107,11 +109,10 @@ async def get_results(task_id: str) -> dict:
         "total_files": task.get("total_files", 0)
     }
 
-
 ###
 
 @app.get("/db_results", response_model=List[schemas.ScanResultSchema])
-async def get_all_from_db():
+async def get_all_from_db(): # Аналогично предыдущему
     """
     Эта функция используется для работы с жестким диском
     и БД на SQL после работы функции perform_analysis из main.py.
@@ -121,8 +122,14 @@ async def get_all_from_db():
     info = crud.get_all_results()
     return info
 
+###
+
 @app.get("/db_quite_pull", response_model=List[schemas.PullQuite])
-async def get_pull_quite_from_db():
+async def get_pull_quite_from_db(): # Аналогично предыдущему
+    """
+    Асинхронная функция выполняет запрос к базе данных через
+    crud.py
+    """
     info = crud.get_pull_quite()
     return info
 
