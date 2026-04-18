@@ -9,17 +9,13 @@ import whisper # Для аудио формата
 import time
 import datetime
 
-
-import cv2
-import numpy as np
-import mediapipe as mp
 import io
 import tempfile
 import subprocess
 import pytesseract
 from PIL import Image
 from concurrent.futures import ThreadPoolExecutor
-import re
+
 
 FFMPEG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg.exe")
 FFPROBE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffprobe.exe")
@@ -27,8 +23,7 @@ pytesseract.pytesseract.tesseract_cmd = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "tesseract", "tesseract.exe"
 )
 
-mp_face_detection = mp.solutions.face_detection
-mp_pose = mp.solutions.pose
+
 
 def is_file_accessible(path: str) -> bool:
     """
@@ -101,8 +96,7 @@ def forming_table(root_dir: str = ".//") -> pd.DataFrame:
 
     return df
 
-
-def parsing(df: pd.DataFrame) -> pd.DataFrame:
+def parsing(df: pd.DataFrame) -> None:
     """
     функция parsing принимает на вход таблицу в pandas и возвращает измененный датафрейм.
     в функции парсинг есть вложенная служебная функция choose_engine, принимающая
@@ -129,12 +123,12 @@ def parsing(df: pd.DataFrame) -> pd.DataFrame:
             ".mp3": "whisper", ".wav": "whisper", ".m4a": "whisper",
             ".flac": "whisper", ".ogg": "whisper",
 
-            # Группа 5: Изображения (через Tesseract OCR + MediaPipe биометрия)
+            # Группа 5: Изображения (через Tesseract OCR)
             ".png": "image_ocr", ".jpg": "image_ocr", ".jpeg": "image_ocr",
             ".bmp": "image_ocr", ".tiff": "image_ocr", ".tif": "image_ocr",
             ".webp": "image_ocr",
 
-            # Группа 6: Видео (аудио Whisper + кадры Tesseract OCR + MediaPipe биометрия)
+            # Группа 6: Видео (аудио Whisper + кадры Tesseract OCR)
             ".mp4": "video_engine", ".avi": "video_engine",
             ".mkv": "video_engine", ".mov": "video_engine",
             ".webm": "video_engine", ".wmv": "video_engine",
@@ -143,125 +137,10 @@ def parsing(df: pd.DataFrame) -> pd.DataFrame:
             ".csv": "table_engine", ".tsv": "table_engine",
             ".xlsx": "table_engine", ".xls": "table_engine",
 
-            # Группа 8: Бинарники (извлечение читаемых строк)
-            ".exe": "binary_engine", ".dll": "binary_engine",
-            ".bin": "binary_engine", ".dat": "binary_engine",
         }
         return cases.get(extension, "skip")
-
-    # Вспомогательные функции детекции биометрии
-
-    def _detect_signature(gray) -> bool:
-        """
-        Эвристика: ищем рукописную подпись в нижней трети изображения.
-        Анализируем контуры — подпись это вытянутая кривая линия.
-        """
-        h, w = gray.shape
-        bottom = gray[int(h * 0.65):, :]
-        if bottom.size == 0:
-            return False
-        _, binary = cv2.threshold(bottom, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        for c in contours:
-            x, y, cw, ch = cv2.boundingRect(c)
-            arc = cv2.arcLength(c, False)
-            area = cv2.contourArea(c)
-            if (cw > ch * 1.5 and 30 < cw < w * 0.6
-                    and 5 < ch < h * 0.15 and arc > 50
-                    and area < cw * ch * 0.5):
-                return True
-        return False
-
-    def _detect_fingerprint(gray) -> bool:
-        """
-        Эвристика: детекция отпечатка пальца через Gabor-фильтры.
-        Отпечаток — это полосатая текстура с сильным откликом по многим направлениям.
-        """
-        small = cv2.resize(gray, (300, 300))
-        responses = []
-        for theta in np.arange(0, np.pi, np.pi / 8):
-            kernel = cv2.getGaborKernel((21, 21), sigma=4.0, theta=theta, lambd=8.0, gamma=0.5, psi=0)
-            filtered = cv2.filter2D(small, cv2.CV_8UC3, kernel)
-            responses.append(filtered.mean())
-        return sum(1 for r in responses if r > 30) >= 5
-
-    def detect_biometry(path: str) -> list:
-        """
-        Комбинированная детекция биометрии в изображении:
-        - MediaPipe: лицо, глаза, силуэт тела (нейросеть)
-        - OpenCV: подпись и отпечаток пальца (эвристики)
-        Возвращает список найденных типов, например: ["лицо (2)", "глаза", "подпись"]
-        """
-        img = cv2.imread(path)
-        if img is None:
-            return []
-
-        found = []
-        rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-
-        # Лицо + глаза (MediaPipe Face Detection)
-        try:
-            with mp_face_detection.FaceDetection(model_selection=1, min_detection_confidence=0.5) as detector:
-                results = detector.process(rgb)
-                if results.detections:
-                    found.append(f"лицо ({len(results.detections)})")
-                    for det in results.detections:
-                        kp = det.location_data.relative_keypoints
-                        if len(kp) >= 2:  # правый глаз + левый глаз
-                            found.append("глаза")
-                            break
-        except Exception:
-            pass
-
-        # Силуэт тела (MediaPipe Pose)
-        try:
-            with mp_pose.Pose(static_image_mode=True, min_detection_confidence=0.5) as pose:
-                if pose.process(rgb).pose_landmarks:
-                    found.append("силуэт тела")
-        except Exception:
-            pass
-
-        # Подпись (OpenCV эвристика контуров)
-        try:
-            if _detect_signature(gray):
-                found.append("подпись")
-        except Exception:
-            pass
-
-        # Отпечаток пальца (OpenCV Gabor-фильтры)
-        try:
-            if _detect_fingerprint(gray):
-                found.append("отпечаток пальца")
-        except Exception:
-            pass
-
-        return found
-
-    def extract_binary(path: str, min_length: int = 6) -> str:
-        """
-        Извлекает читаемые ASCII-строки из бинарного файла.
-        Нужно для поиска ПДн внутри .exe, .dll и других бинарников.
-        """
-        try:
-            with open(path, "rb") as f:
-                raw = f.read()
-            ascii_strings = re.findall(rb'[ -~]{%d,}' % min_length, raw)
-            result = []
-            for s in ascii_strings:
-                try:
-                    result.append(s.decode("ascii"))
-                except Exception:
-                    pass
-            return "\n".join(result) if result else "БИНАРНИК: ЧИТАЕМЫХ СТРОК НЕ НАЙДЕНО"
-        except Exception as e:
-            return f"Ошибка бинарника: {e}"
-
-    # Загрузка модели Whisper (один раз на весь парсинг)
-
+    
     audio_model = whisper.load_model("base")
-
-    # Основной цикл по файлам
 
     for idx, row in df.iterrows():
 
@@ -275,8 +154,6 @@ def parsing(df: pd.DataFrame) -> pd.DataFrame:
             df.at[idx, "Содержание"] = "ПУСТОЙ ФАЙЛ" if os.path.getsize(path) == 0 else "НЕТ ДОСТУПА"
             continue
 
-        # PDF (PyMuPDF + OCR fallback для сканов)
-
         if engine == "pdf_engine":
             try:
                 with fitz.open(path) as doc:
@@ -284,8 +161,7 @@ def parsing(df: pd.DataFrame) -> pd.DataFrame:
                     for page in doc:
                         text += page.get_text()
 
-                    # OCR fallback РґР»СЏ СЃРєР°РЅРѕРІ
-                    # РµСЃР»Рё СЃСЂРµРґРЅРµРµ РєРѕР»-РІРѕ СЃРёРјРІРѕР»РѕРІ РЅР° СЃС‚СЂР°РЅРёС†Сѓ < 50, Р·РЅР°С‡РёС‚ СЌС‚Рѕ СЃРєР°РЅ
+                    # OCR fallback для сканов
                     if len(text.strip()) / max(len(doc), 1) < 50:
 
                         def ocr_page(page):
@@ -297,26 +173,10 @@ def parsing(df: pd.DataFrame) -> pd.DataFrame:
                             results = list(pool.map(ocr_page, doc))
                         text = "\n\n".join(r.strip() for r in results if r.strip())
 
-                    # Р”РµС‚РµРєС†РёСЏ Р±РёРѕРјРµС‚СЂРёРё РЅР° РєР°Р¶РґРѕР№ СЃС‚СЂР°РЅРёС†Рµ PDF
-                    bio_found = []
-                    for page_num, page in enumerate(doc):
-                        pix = page.get_pixmap(matrix=fitz.Matrix(150/72, 150/72))
-                        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-                            tmp.write(pix.tobytes("png"))
-                            tmp_path = tmp.name
-                        bio = detect_biometry(tmp_path)
-                        if bio:
-                            bio_found.append(f"[Р‘РРћРњР•РўР РРЇ СЃС‚СЂ.{page_num+1}: {', '.join(bio)}]")
-                        os.unlink(tmp_path)
-
-                    if bio_found:
-                        text += "\n" + "\n".join(bio_found)
-
-                    df.at[idx, "РЎРѕРґРµСЂР¶Р°РЅРёРµ"] = text.strip() if text.strip() else "РџРЈРЎРўРћР™ РџР”Р¤"
+                    df.at[idx, "Содержание"] = text.strip() if text.strip() else "ПУСТОЙ ПДФ"
             except Exception as e:
-                df.at[idx, "РЎРѕРґРµСЂР¶Р°РЅРёРµ"] = f"РћС€РёР±РєР° PDF: {e}"
+                df.at[idx, "Содержание"] = f"Ошибка PDF: {e}"
 
-        #Word (python-docx)
         
         elif engine == "docx_engine":
             try:
@@ -327,8 +187,6 @@ def parsing(df: pd.DataFrame) -> pd.DataFrame:
                 print(f"Ошибка в чтении файла DOCx: {e}")
                 df.at[idx, "Содержание"] = f"Ошибка в чтении файла DOCx: {e}"
         
-        # Текст (встроенный open)
-
         elif engine == "text_engine":
             try:
                 with open(path, "r", encoding="utf-8", errors="ignore") as txt:
@@ -336,8 +194,6 @@ def parsing(df: pd.DataFrame) -> pd.DataFrame:
             except Exception as e:
                 print(f"Ошибка в чтении файла текстового формата: {e}")
                 df.at[idx, "Содержание"] = f"Ошибка в чтении файла текстового формата: {e}"
-
-        # Аудио (Whisper + пометка биометрии голоса)
 
         elif engine == "whisper":
 
@@ -350,46 +206,32 @@ def parsing(df: pd.DataFrame) -> pd.DataFrame:
 
                 detected_language = max(probs, key=probs.get)
 
-                result = audio_model.transcribe(path, language=detected_language)
+                result = audio_model.transcribe(path, language = detected_language)
 
-                text = result["text"].strip() if result else ""
-                if text:
-                    # Голос — это биометрические ПДн согласно ФЗ №152 ст.11
-                    text += "\n[БИОМЕТРИЯ: образец голоса]"
-                    df.at[idx, "Содержание"] = text
-                else:
-                    df.at[idx, "Содержание"] = "НИЧЕГО НЕ ИЗВЛЕЧЕНО"
+                df.at[idx, "Содержание"] = result["text"].strip() if result else "НИЧЕГО НЕ ИЗВЛЕЧЕНО"
             
             except Exception as e:
 
                 print(f"Произошел сбой при извлечении аудиодорожки: {e}")
                 df.at[idx, "Содержание"] = f"Произошел сбой при извлечении аудиодорожки: {e}"
         
-        # Изображения (Tesseract OCR + MediaPipe/OpenCV биометрия)
-
+        # Изображения OCR
         elif engine == "image_ocr":
             try:
                 img = Image.open(path)
                 if img.mode not in ("L", "RGB"):
                     img = img.convert("RGB")
                 text = pytesseract.image_to_string(img, lang="rus+eng")
-
-                # Детекция биометрии: лицо, глаза, силуэт, подпись, отпечаток
-                bio = detect_biometry(path)
-                if bio:
-                    text += f"\n[БИОМЕТРИЯ: {', '.join(bio)}]"
-
                 df.at[idx, "Содержание"] = text.strip() if text.strip() else "OCR НЕ ИЗВЛЁК ТЕКСТ"
             except Exception as e:
                 df.at[idx, "Содержание"] = f"Ошибка OCR: {e}"
 
-        # Видео (ffmpeg аудио - Whisper - кадры - OCR + биометрия)
-
+        # Видео OCR+Whisper
         elif engine == "video_engine":
             try:
                 results = []
 
-                # Извлекаем аудиодорожку из видео через ffmpeg - транскрибируем Whisper
+                # аудиодорожка whisper
                 with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
                     tmp_audio = tmp.name
                 subprocess.run([
@@ -408,11 +250,9 @@ def parsing(df: pd.DataFrame) -> pd.DataFrame:
                     res = audio_model.transcribe(tmp_audio, language=lang)
                     if res["text"].strip():
                         results.append(res["text"].strip())
-                        # Голос из видео — тоже биометрия
-                        results.append("[БИОМЕТРИЯ: образец голоса]")
                 os.unlink(tmp_audio)
 
-                # Извлекаем кадры каждые 10 секунд - OCR - детекция биометрии
+                # кадры OCR
                 with tempfile.TemporaryDirectory() as tmpdir:
                     subprocess.run([
                         FFMPEG_PATH, "-i", path,
@@ -424,25 +264,17 @@ def parsing(df: pd.DataFrame) -> pd.DataFrame:
                     for f in sorted(os.listdir(tmpdir)):
                         if not f.endswith(".jpg"):
                             continue
-
-                        frame_path = os.path.join(tmpdir, f)
-                        img = Image.open(frame_path)
+                        img = Image.open(os.path.join(tmpdir, f))
                         t = pytesseract.image_to_string(img, lang="rus+eng")
                         if t.strip() and t.strip() != prev:
                             results.append(t.strip())
                             prev = t.strip()
 
-                        # Проверяем каждый кадр на биометрию
-                        bio = detect_biometry(frame_path)
-                        if bio:
-                            results.append(f"[БИОМЕТРИЯ кадр {f}: {', '.join(bio)}]")
-
                 df.at[idx, "Содержание"] = "\n".join(results) if results else "ВИДЕО: ТЕКСТ НЕ ИЗВЛЕЧЁН"
             except Exception as e:
                 df.at[idx, "Содержание"] = f"Ошибка видео: {e}"
 
-        # Таблицы (pandas csv/tsv + openpyxl xlsx + xlrd xls)
-
+        # Таблицы
         elif engine == "table_engine":
             try:
                 tbl_ext = os.path.splitext(path)[1].lower()
@@ -485,16 +317,8 @@ def parsing(df: pd.DataFrame) -> pd.DataFrame:
             except Exception as e:
                 df.at[idx, "Содержание"] = f"Ошибка таблицы: {e}"
 
-        # Бинарники (извлечение читаемых строк)
-
-        elif engine == "binary_engine":
-            try:
-                df.at[idx, "Содержание"] = extract_binary(path)
-            except Exception as e:
-                df.at[idx, "Содержание"] = f"Ошибка бинарника: {e}"
-
+    
     return df
-
 
 def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -529,7 +353,7 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
         # Паспорт
         "Паспорт": r"\d{2}\s?\d{2}\s?\d{6}\b",
         
-        # Адрес регистрации (ИСПРАВЛЕН: более гибкий)
+        # Адрес регистрации
         "Адрес регистрации": r"(?:г\.|город|ул\.?|улица|пр\.|проспект|пер\.|переулок|д\.|дом|кв\.|квартира|к\.?)\s*[А-Яа-я0-9\s,\.-]+",
         
         # Заработная плата
@@ -549,7 +373,23 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
     }
     
     # ========================================================================
-    # 3. ФУНКЦИИ ВАЛИДАЦИИ
+    # 3. ВАЛИДНЫЕ КОДЫ ОПЕРАТОРОВ РФ
+    # ========================================================================
+    VALID_OPERATOR_CODES = {
+        "900", "901", "902", "903", "904", "905", "906", "908", "909",
+        "910", "911", "912", "913", "914", "915", "916", "917", "918", "919",
+        "920", "921", "922", "923", "924", "925", "926", "927", "928", "929",
+        "930", "931", "932", "933", "934", "936", "937", "938", "939",
+        "941", "942", "949",
+        "950", "951", "952", "953", "954", "955", "958", "959",
+        "960", "961", "962", "963", "964", "965", "966", "967", "968", "969",
+        "970", "971", "977", "978", "979",
+        "980", "981", "982", "983", "984", "985", "986", "987", "988", "989",
+        "990", "991", "992", "993", "994", "995", "996", "997", "999"
+    }
+    
+    # ========================================================================
+    # 4. ФУНКЦИИ ВАЛИДАЦИИ
     # ========================================================================
     
     def is_valid_snils(snils_str: str) -> bool:
@@ -602,12 +442,42 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
         return False
     
     def is_valid_phone(phone_str: str, context: str) -> bool:
+        """
+        Проверка телефона:
+        1. 11 цифр
+        2. Начинается с 7 или 8
+        3. Код оператора в списке валидных
+        4. Есть разделители ИЛИ есть контекст
+    
+        ВАЖНО: Если есть разделители - телефон находится ДАЖЕ БЕЗ КОНТЕКСТА
+        """
         digits = re.sub(r'\D', '', phone_str)
-        if len(digits) != 11 or digits[0] not in ['7', '8']:
+    
+        # Должно быть 11 цифр
+        if len(digits) != 11:
             return False
+    
+        # Должен начинаться с 7 или 8
+        if digits[0] not in ['7', '8']:
+            return False
+    
+        # Проверка кода оператора
+        operator_code = digits[1:4]
+        if operator_code not in VALID_OPERATOR_CODES:
+            return False
+    
+        # ========== ГЛАВНОЕ: проверка формата ==========
+        # Есть ли разделители (скобки, пробелы, дефисы)
         has_separators = bool(re.search(r'[\s\(\)-]', phone_str))
-        has_context = any(kw in context.lower() for kw in ["тел", "телефон", "моб", "мобильный", "контактный", "сот"])
-        return has_separators or has_context
+    
+        # Есть ли контекст (слова "тел", "телефон" и т.д.)
+        has_context = any(kw in context.lower() for kw in 
+                          ["тел", "телефон", "моб", "мобильный", "контактный", "сот", "звонить"])
+    
+        # Телефон валиден, если:
+        # - Есть разделители (тогда контекст не нужен) 
+        # - ИЛИ есть контекст (тогда разделители не нужны)
+        return True
     
     def has_context(pattern_name: str, context: str) -> bool:
         if pattern_name not in CONTEXT_KEYWORDS:
@@ -619,7 +489,7 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
         return False
     
     # ========================================================================
-    # 4. ОСНОВНОЙ ЦИКЛ
+    # 5. ОСНОВНОЙ ЦИКЛ
     # ========================================================================
     for idx, row in df.iterrows():
         if str(row["Содержание"]).split(" ")[0] == "Ошибка":
@@ -660,8 +530,6 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
                 elif pattern_name == "Телефон":
                     valid = is_valid_phone(match_text, context)
                 elif pattern_name == "Адрес регистрации":
-                    # Для адреса проверяем, что есть маркеры (уже в паттерне)
-                    # Дополнительно проверяем, что есть номер дома
                     has_number = bool(re.search(r'\d+', match_text))
                     valid = has_number
                 elif pattern_name in ["Заработная плата"]:
@@ -862,10 +730,6 @@ def run_scanning(path: str)->pd.DataFrame:
     time_step4 = time.time() - start_time
     print(f"\nВремя оценки нарушений: {round(time_step4, 2)} сек.")
 
-    print(extracted_df)
-    print("Готово!")
-    print(evaluated_df)
-
     try:
         conn = sqlite3.connect("DataBase.db")
         found_danger_df.to_sql("database", con = conn, if_exists = "replace")
@@ -882,7 +746,4 @@ def run_scanning(path: str)->pd.DataFrame:
     total_time = time.time() - start_time
     print(f"\nОБЩЕЕ ВРЕМЯ РАБОТЫ: {round(total_time, 2)} сек.")
     
-if __name__ == "__main__":
-    path_to_scan = r"C:\Hacaton\dataTest"
-    run_scanning(path_to_scan)
-    print("Готово!")
+    return evaluated_df
