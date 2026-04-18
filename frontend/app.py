@@ -23,7 +23,13 @@ if "df_report" not in st.session_state:
 # Две данные переменные хранят информацию о состояниях кнопок. В стримлит файл app.py
 # Каждый раз перезапускается системой при любом изменении
 
-def generate_markdown_report(quite_res, df_report):
+def generate_markdown_report(quite_res, df_report) -> str:
+
+    """
+    функция принимает на вход состояния сессий для краткой выжимки и полного отчета
+    В отчет входит краткая выжимка, графики на основе полного репорта, а также таблица репорта
+    ВНа выходе получаем строку
+    """
 
     now = datetime.datetime.now().strftime("%d.%m.%Y %H:%M")
     md = []
@@ -68,6 +74,11 @@ def generate_markdown_report(quite_res, df_report):
     return "\n".join(md)
 
 def create_zip_archive(quite_res, df_report):
+
+    """
+    Функция формирует .zip архив, пользуясь функцией generate_markdown_report
+    На вход также поступают состояния сессии для краткой выжимки и полного отчета
+    """
     zip_buffer = io.BytesIO()
     
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -103,6 +114,9 @@ if st.sidebar.button(label="Получить подробный отчет"):
     st.session_state['show_full_report'] = not st.session_state['show_full_report'] # Простая инверсия состояния
 
 if start_button: 
+    """
+    Данный блок кода выполняется при нажатии кнопки "Запустить сканирование"
+    """
     st.session_state['scan_finished'] = False 
     st.session_state['show_full_report'] = False
 
@@ -155,6 +169,13 @@ if start_button:
 
 
 if st.session_state['scan_finished']: # Сканирование завершено - выводим базовую информацию
+    
+    """
+    Данная часть кода выполняется, когда закончилось сканирование. В данной части будут выведены:
+    1) Краткая сводка
+    2) BarChart и PieChart
+    """
+
     st.subheader("Краткая сводка")
     try:
         response = requests.get(f"{BASE_URL}/db_quite_pull") # снова отправляем запрос к АПИ - по короткой сводке
@@ -250,6 +271,9 @@ def is_too_big(df: pd.DataFrame) -> bool:
 
 
 if st.session_state['show_full_report']: 
+    """
+    Срабатывает по нажатию кнопки - "Получить полный отчет"
+    """
     st.divider()    
     st.title("Подробный отчет")
 
