@@ -661,7 +661,7 @@ def parsing(df, update_callback=None):
     """
     tasks = [(idx, row["Путь"], row["Расширение"]) for idx, row in df.iterrows()]
     
-    with concurrent.futures.ProcessPoolExecutor(max_workers=4) as executor:
+    with concurrent.futures.ProcessPoolExecutor(max_workers=12) as executor: # для моего процессора i5-12500 лучше 8
         futures = {executor.submit(worker_parse_file, t): t for t in tasks}
         for i, f in enumerate(concurrent.futures.as_completed(futures)):
             res_idx, content = f.result()
