@@ -22,6 +22,8 @@ from PIL import Image
 from concurrent.futures import ThreadPoolExecutor
 import re
 
+import mediapipe as mp
+
 FFMPEG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg.exe")
 FFPROBE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffprobe.exe")
 pytesseract.pytesseract.tesseract_cmd = os.path.join(
