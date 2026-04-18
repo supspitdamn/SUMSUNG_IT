@@ -209,6 +209,11 @@ def forming_table(root_dir: str = ".//") -> pd.DataFrame:
 
 ### Служебные функции
 def choose_engine(extension: str) -> str:
+        
+        """
+        Функция принимает на вход расширение файла в формате строки
+        и возвращает имя соответствующего обработчика
+        """
 
         extension = extension.lower()
         cases = {
@@ -257,17 +262,17 @@ def choose_engine(extension: str) -> str:
         return cases.get(extension, "skip")
 
 def flatten_json(obj, prefix=""):
-                    """Рекурсивно разворачиваем JSON в плоский текст"""
-                    parts = []
-                    if isinstance(obj, dict):
-                        for k, v in obj.items():
-                            parts.extend(flatten_json(v, f"{prefix}{k}: "))
-                    elif isinstance(obj, list):
-                        for item in obj:
-                            parts.extend(flatten_json(item, prefix))
-                    else:
-                        parts.append(f"{prefix}{obj}")
-                    return parts
+    """Рекурсивно разворачиваем JSON в плоский текст"""
+    parts = []
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            parts.extend(flatten_json(v, f"{prefix}{k}: "))
+    elif isinstance(obj, list):
+        for item in obj:
+            parts.extend(flatten_json(item, prefix))
+    else:
+        parts.append(f"{prefix}{obj}")
+    return parts
 
 def extract_binary(path: str, min_length: int = 6) -> str:
     """
@@ -320,7 +325,6 @@ def _detect_fingerprint(path: str) -> bool:
         except Exception:
             pass
         return False
-
 
 def detect_biometry(path: str) -> list:
         """
@@ -524,9 +528,6 @@ def worker_parse_file(file_data):
             except Exception as e:
                 return idx, f"Ошибка таблицы: {str(e)}"
         
-        ### Тяжеловесные
-                
-
         elif engine == "docx_engine":
 
             try:
@@ -556,6 +557,7 @@ def worker_parse_file(file_data):
 
         
         ### Тяжеловесные
+        
 
         elif engine == "pdf_engine":
             try:
@@ -806,11 +808,13 @@ def worker_parse_file(file_data):
 def parsing(df, update_callback=None):
 
     """
-    
+    Функция парсинга принимает на вход таблицу с заполненной колонкой содержание,
+    а также ссылку на функцию логирования для визуала приложения. Функцию сделали асинхронной,
+    на нескольких ядрах процессора для получения более высокой скорости работы
     """
     tasks = [(idx, row["Путь"], row["Расширение"]) for idx, row in df.iterrows()]
     
-    with concurrent.futures.ProcessPoolExecutor(max_workers=4) as executor:
+    with concurrent.futures.ProcessPoolExecutor(max_workers=8) as executor:
         futures = {executor.submit(worker_parse_file, t): t for t in tasks}
         for i, f in enumerate(concurrent.futures.as_completed(futures)):
             res_idx, content = f.result()
@@ -838,9 +842,8 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
     _init_natasha()
     _init_bic_directory()
     
-    # ========================================================================
-    # 1. КЛЮЧЕВЫЕ СЛОВА ДЛЯ КОНТЕКСТА
-    # ========================================================================
+    # Ключевые слова для определения "Даты рождения
+
     BIRTH_KEYWORDS = [
         "родился", "родилась", "рождение", "рождён", "рождена",
         "дата рождения", "день рождения", "год рождения",
@@ -849,6 +852,8 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
         "date of birth", "birth date", "born"
     ]
     
+    # Ключевые слова для определения "Адреса проживания"
+
     ADDRESS_KEYWORDS = [
         "адрес регистрации", "место регистрации", "зарегистрирован по адресу",
         "адрес места жительства", "место жительства", "прописка",
@@ -870,9 +875,8 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
         "транспортная", "страховая", "управляющая", "ресурсоснабжающая",
     ]
     
-    # ========================================================================
-    # 2. ПАТТЕРНЫ ДЛЯ ПОИСКА
-    # ========================================================================
+    # Паттерны для всего того, что имеет четкую структуру
+
     patterns = {
         "Телефон": r"(?:\+7|8)[\s\(-]?\d{3}[\s\)-]?\d{3}[\s-]?\d{2}[\s-]?\d{2}\b",
         "Email": r"[\w\.-]+@[\w\.-]+\.\w+",
@@ -894,9 +898,8 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
         "Биометрия: голос": r"\[БИОМЕТРИЯ[^\]]*голос",
     }
     
-    # ========================================================================
-    # 3. СПИСКИ ДЛЯ ПРОВЕРКИ
-    # ========================================================================
+    # Названия рас для определения национализма
+
     RACE_VALUES = {
         "европеоид", "европеоидная", "европеоидной", "европеоидную", "европеоидный",
         "кавказоид", "кавказоидная", "кавказоидной", "кавказоидную", "кавказоидный",
@@ -905,6 +908,8 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
         "австралоид", "австралоидная", "австралоидной", "австралоидную", "австралоидный",
     }
     
+    # Названия национальностей для определения национализма
+
     NATIONALITIES = {
         "русский", "русская", "татарин", "татарка", "украинец", "украинка",
         "башкир", "башкирка", "чуваш", "чувашка", "чеченец", "чеченка",
@@ -913,20 +918,28 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
         "киргиз", "киргизка", "грузин", "грузинка", "молдаванин", "молдаванка",
         "немец", "немка", "еврей", "еврейка", "кореец", "кореянка", "китаец", "китаянка",
     }
+
+    # Названия религий для определения национализма
     
     RELIGIONS = {
         "православие", "христианство", "ислам", "буддизм", "иудаизм",
         "католицизм", "протестантизм", "индуизм", "атеист", "агностик"
     }
+
+    # Разновидности политических взглядов
     
     POLITICAL_VIEWS = {
         "коммунист", "либерал", "консерватор", "социал-демократ",
         "националист", "анархист", "социалист", "демократ", "монархист"
     }
+
+    # Маркеры, указывающие на отношение к криминалу
     
     CRIMINAL_WORDS = {
         "судимость", "судим", "осужден", "привлекался", "несудим"
     }
+
+    # Коды операторов
     
     VALID_OPERATOR_CODES = {
         "900", "901", "902", "903", "904", "905", "906", "908", "909",
@@ -941,11 +954,12 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
         "990", "991", "992", "993", "994", "995", "996", "997", "999"
     }
     
-    # ========================================================================
-    # 4. ФУНКЦИИ ВАЛИДАЦИИ
-    # ========================================================================
-    
+
     def is_valid_snils(snils_str: str) -> bool:
+        """
+        Функция принимает н авход строку с предположительным СНИЛСом
+        для проверки его методом контрольной суммы
+        """
         digits = re.sub(r'\D', '', snils_str)
         if len(digits) != 11 or digits == "00000000000":
             return False
@@ -956,6 +970,10 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
         return check == int(digits[9:])
     
     def is_valid_inn(inn_str: str) -> bool:
+        """
+        Функция принимает на вход строку придположительного ИНН
+        для проверки методом контрольных сумм
+        """
         if not inn_str.isdigit():
             return False
         inn_len = len(inn_str)
@@ -983,6 +1001,10 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
         return False
     
     def is_valid_phone(phone_str: str) -> bool:
+        """
+        Функция принимает на вход строку предположительного телефонного номера
+        для проверки его по паттернам и кодам регионов
+        """
         digits = re.sub(r'\D', '', phone_str)
         if len(digits) != 11:
             return False
@@ -992,6 +1014,10 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
         return operator_code in VALID_OPERATOR_CODES
     
     def is_valid_driver_license(license_str: str) -> bool:
+        """
+        Функция принимает на вход текст предположительного ВОД. УД
+        для проверки
+        """
         VALID_LETTERS = set("АВЕКМНОРСТУХ")
         if len(license_str) != 8:
             return False
@@ -1003,6 +1029,10 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
         return True
     
     def is_valid_mrz(mrz_str: str) -> bool:
+        """
+        Функция принимает на вход строку предположительного МРЗ
+        для проверки
+        """
         mrz_clean = mrz_str.replace(' ', '').replace('\n', '').replace('\r', '')
         if len(mrz_clean) not in [44, 88]:
             return False
@@ -1011,6 +1041,10 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
         return True
     
     def is_valid_card_number(card_str: str) -> bool:
+        """
+        Функция принимает на вход предположительный номер карточки
+        для проверки
+        """
         digits = re.sub(r'[\s-]', '', card_str)
         if not digits.isdigit() or len(digits) != 16:
             return False
@@ -1025,6 +1059,10 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
         return total % 10 == 0
     
     def is_valid_bic(bic_str: str) -> bool:
+        """
+        Функция принимает на вход прдположительный номер БИК
+        для проверки
+        """
         if not bic_str.isdigit() or len(bic_str) != 9:
             return False
         if not bic_str.startswith('04'):
@@ -1032,6 +1070,10 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
         return bic_str in _VALID_BICS
     
     def is_valid_bank_account(account_str: str, bic_str: str = None) -> tuple:
+        """
+        Функция принимает на вход предположительную строку аккаунта и
+        предпооложительный номер БИК для проверки
+        """
         digits = re.sub(r'\D', '', account_str)
         if len(digits) != 20:
             return (False, "не 20 цифр")
@@ -1051,10 +1093,17 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
         return (False, "нет БИК для проверки")
     
     def is_valid_cvv(cvv_str: str) -> bool:
+        """
+        Функция принимает на вход строку предположительного номера CVV
+        для проверки
+        """
         digits = re.sub(r'\D', '', cvv_str)
         return len(digits) == 3 and digits.isdigit()
     
     def is_valid_oms_policy(policy_str: str) -> bool:
+        """
+        Функиця принимает на вход номер полиса oms для проверки
+        """
         digits = re.sub(r'\D', '', policy_str)
         if len(digits) != 16:
             return False
@@ -1062,9 +1111,8 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
         total = sum(int(d) * w for d, w in zip(digits, weights))
         return total % 10 == 0
     
-    # ========================================================================
-    # 5. ФУНКЦИЯ ПОИСКА ФИО ЧЕРЕЗ NATASHA
-    # ========================================================================
+    # Поиск имен реализуем при помощи Наташи
+
     def find_person_names(text: str, file_path: str = "") -> int:
         """
         Ищет ФИО в тексте с помощью Natasha.
@@ -1263,10 +1311,13 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
             print(f"Ошибка при поиске ФИО: {e}")
             return 0
     
-    # ========================================================================
-    # 6. ФУНКЦИЯ ПРОВЕРКИ ДАТЫ РОЖДЕНИЯ
-    # ========================================================================
+    # Функция работает на основе Наташи
     def find_birth_dates(text: str) -> list:
+        
+        """
+        Функция принимает на вход номер предположительной даты рождения и возвращает список
+        все даты по контексту
+        """
         if not _NATASHA_INITIALIZED or _NATASHA_DATES_EXTRACTOR is None:
             return []
         
@@ -1339,10 +1390,11 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
         
         return [dates_with_context[0]['text']]
     
-    # ========================================================================
-    # 7. ФУНКЦИЯ ПОИСКА ЛОКАЦИЙ ПО КЛЮЧЕВЫМ СЛОВАМ
-    # ========================================================================
+    #  Функция работает при помощи Наташи
     def find_locations_by_keywords(text: str, keywords: list) -> list:
+        """
+        Функция принимает на вход ключевые слова и текст для определения из контекста локации
+        """
         if not _NATASHA_INITIALIZED or _NATASHA_NER_TAGGER is None:
             return []
         
@@ -1427,9 +1479,8 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
             print(f"Ошибка при поиске локаций: {e}")
             return []
     
-    # ========================================================================
-    # 8. ОСНОВНОЙ ЦИКЛ
-    # ========================================================================
+    # Здесь реализована логика поиска текста
+
     for idx, row in df.iterrows():
         if str(row["Содержание"]).split(" ")[0] == "Ошибка":
             df.at[idx, "Найденные ПДн"] = "Нет никаких нарушений"
@@ -1450,9 +1501,7 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
                     'end': match.end()
                 })
         
-        # ====================================================================
-        # 8.1. ПОИСК ПО РЕГУЛЯРНЫМ ВЫРАЖЕНИЯМ
-        # ====================================================================
+        # Поиск по паттернам
         for pattern_name, pattern in patterns.items():
             text_to_search = info_lower if pattern_name in ["Медицина", "Паспорт", "CVV", "Полис ОМС"] else info
             
@@ -1491,38 +1540,26 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
                 if valid:
                     pd_count[pattern_name] += 1
         
-        # ====================================================================
-        # 8.2. ПОИСК ФИО
-        # ====================================================================
+
         names_count = find_person_names(info)
         if names_count > 0:
             pd_count["ФИО"] = names_count
-        
-        # ====================================================================
-        # 8.3. ПОИСК ДАТЫ РОЖДЕНИЯ
-        # ====================================================================
+  
         birth_dates = find_birth_dates(info)
         if birth_dates:
             pd_count["Дата рождения"] = len(birth_dates)
         
-        # ====================================================================
-        # 8.4. ПОИСК МЕСТА РОЖДЕНИЯ
-        # ====================================================================
+ 
         birth_keywords = ["родился", "родилась", "место рождения", "уроженец", "уроженка"]
         birth_places = find_locations_by_keywords(info, birth_keywords)
         if birth_places:
             pd_count["Место рождения"] = len(birth_places)
         
-        # ====================================================================
-        # 8.5. ПОИСК АДРЕСА РЕГИСТРАЦИИ
-        # ====================================================================
+
         address_places = find_locations_by_keywords(info, ADDRESS_KEYWORDS)
         if address_places:
             pd_count["Адрес регистрации"] = len(address_places)
         
-        # ====================================================================
-        # 8.6. ПОИСК ПО NATASHA (словари)
-        # ====================================================================
         if _NATASHA_INITIALIZED and _NATASHA_NER_TAGGER is not None:
             try:
                 from natasha import Doc
@@ -1555,9 +1592,6 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
             except Exception as e:
                 print(f"Ошибка при обработке Natasha: {e}")
         
-        # ====================================================================
-        # 8.7. ФОРМИРОВАНИЕ РЕЗУЛЬТАТА
-        # ====================================================================
         if pd_count:
             result_parts = [f"{pd_type}({count})" for pd_type, count in pd_count.items()]
             df.at[idx, "Найденные ПДн"] = ",".join(result_parts)
@@ -1710,6 +1744,7 @@ def categories(df: pd.DataFrame) -> pd.DataFrame:
             df.at[idx, "Категории"] = "Неизвестная категория"
     
     return df
+
 
 def evaluate_violations(df: pd.DataFrame) -> pd.DataFrame:
     """
