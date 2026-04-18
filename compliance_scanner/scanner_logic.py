@@ -137,7 +137,7 @@ def forming_table(root_dir: str = ".//") -> pd.DataFrame:
 
                     # ловим другие ошибки (файл удален в процессе поиска и т.д.)
 
-                df = pd.DataFrame(raw_data)
+        df = pd.DataFrame(raw_data)
         df['Содержание'] = "NO"
         df['Требуемый УЗ'] = 0.0
         df['Найденные ПДн'] = "NO"
@@ -1487,6 +1487,7 @@ def run_scanning(path: str, update_callback = None)->pd.DataFrame:
         conn = sqlite3.connect("DataBase.db")
         evaluated_df.to_sql("scan_results", con = conn, if_exists = "replace")
         print("Успешно создана база данных")
+        print(evaluated_df.columns)
 
     except Exception as e:
 
@@ -1496,7 +1497,6 @@ def run_scanning(path: str, update_callback = None)->pd.DataFrame:
 
         conn.close()
 
-    print(evaluated_df["Категории"])
     # Итог
     total_time = time.time() - start_time
     print(f"\nОБЩЕЕ ВРЕМЯ РАБОТЫ: {round(total_time, 2)} сек.")
