@@ -91,11 +91,14 @@ def forming_table(root_dir: str = ".//") -> pd.DataFrame:
                 except Exception as e:
 
                     print(f"Ошбика при обработке метаданных файла {name}: {e}")
+
                     # ловим другие ошибки (файл удален в процессе поиска и т.д.)
+
                 df = pd.DataFrame(raw_data)
                 df['Содержание'] = "NO"
                 df['Рейтинг опасности'] = 0.0
                 df['Найденные ПДн'] = "NO"
+                df['Категории'] = "NO"
 
     return df
 
@@ -140,6 +143,7 @@ def parsing(df: pd.DataFrame) -> None:
             ".csv": "table_engine", ".tsv": "table_engine",
             ".xlsx": "table_engine", ".xls": "table_engine",
 
+            ".parquet" : "binary_engine"
         }
         return cases.get(extension, "skip")
     
@@ -180,7 +184,6 @@ def parsing(df: pd.DataFrame) -> None:
             except Exception as e:
                 df.at[idx, "Содержание"] = f"Ошибка PDF: {e}"
 
-        
         elif engine == "docx_engine":
             try:
                 doc = Document(path)
@@ -198,6 +201,7 @@ def parsing(df: pd.DataFrame) -> None:
                 print(f"Ошибка в чтении файла текстового формата: {e}")
                 df.at[idx, "Содержание"] = f"Ошибка в чтении файла текстового формата: {e}"
 
+        # Звуки
         elif engine == "whisper":
 
             try:
@@ -320,7 +324,22 @@ def parsing(df: pd.DataFrame) -> None:
             except Exception as e:
                 df.at[idx, "Содержание"] = f"Ошибка таблицы: {e}"
 
-    
+        # Бинарники
+        elif engine == "binary_engine":
+            try:
+
+                temp = polars.read_parquet(path)
+                
+                raw_text = " ".join(temp.select(polars.all().cast(polars.Utf8)).to_series().to_list())
+                
+                df.at[idx, "Содержание"] = raw_text
+            
+            except Exception as e:
+                error_msg = f"Ошибка в чтении бинарника. Детали: {e}"
+                print(error_msg)
+                df.at[idx, "Содержание"] = error_msg
+
+
     return df
 
 def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
@@ -553,7 +572,6 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
             df.at[idx, "Найденные ПДн"] = "Нет никаких нарушений"
     
     return df
-
 
 def evaluate_violations(df: pd.DataFrame) -> pd.DataFrame:
     """
