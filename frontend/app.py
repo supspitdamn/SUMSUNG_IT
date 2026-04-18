@@ -3,6 +3,7 @@ import requests
 import pandas as pd
 import matplotlib.pyplot as plt
 import time
+import datetime
 
 st.set_page_config(page_title="152-ФЗ Сканер", layout="wide")
 BASE_URL = "http://127.0.0.1:8000" # Адрес сервера с АПИ
@@ -20,7 +21,7 @@ if "df_report" not in st.session_state:
 # Каждый раз перезапускается системой при любом изменении
 
 def generate_markdown_report(quite_res, df_report):
-    import datetime
+
     now = datetime.datetime.now().strftime("%d.%m.%Y %H:%M")
     md = []
 
