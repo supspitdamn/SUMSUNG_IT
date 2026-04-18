@@ -26,6 +26,9 @@ from striprtf.striprtf import rtf_to_text
 import concurrent.futures
 import json
 
+import concurrent.futures
+import json
+
 FFMPEG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg.exe")
 FFPROBE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffprobe.exe")
 pytesseract.pytesseract.tesseract_cmd = os.path.join(
@@ -69,6 +72,38 @@ def load_bic_directory(xml_path: str = "20260417_ED807_full.xml") -> None:
         
 mp_face_detection = mp.solutions.face_detection
 mp_pose = mp.solutions.pose
+
+# ====================================================================
+# МОДЕЛИ ДЛЯ ДЕТЕКЦИИ БИОМЕТРИИ (загружаются один раз при старте)
+# ====================================================================
+from huggingface_hub import hf_hub_download
+from ultralytics import YOLO
+from transformers import pipeline as hf_pipeline
+
+# YOLOv8s — детекция рукописных подписей (~22 МБ, mAP@50 = 94.5%)
+try:
+    _sig_model_path = hf_hub_download(
+        repo_id="tech4humans/yolov8s-signature-detector",
+        filename="yolov8s.pt"
+    )
+    _sig_model = YOLO(_sig_model_path)
+    print("Модель подписей: OK")
+except Exception as e:
+    _sig_model = None
+    print(f"Модель подписей не загружена: {e}")
+
+# SigLIP — zero-shot классификация отпечатков пальцев (~400 МБ)
+try:
+    _fp_classifier = hf_pipeline(
+        "zero-shot-image-classification",
+        model="google/siglip-base-patch16-224"
+    )
+    _fp_labels = ["a fingerprint", "a document with text", "a photo of a person"]
+    print("Модель отпечатков: OK")
+except Exception as e:
+    _fp_classifier = None
+    print(f"Модель отпечатков не загружена: {e}")
+
 
 
 def is_file_accessible(path: str) -> bool:
@@ -146,7 +181,9 @@ def forming_table(root_dir: str = ".//") -> pd.DataFrame:
     return df
 
 ### Служебные функции
+### Служебные функции
 
+def choose_engine(extension: str) -> str:
 def choose_engine(extension: str) -> str:
 
         extension = extension.lower()
@@ -227,12 +264,47 @@ def extract_binary(path: str, min_length: int = 6) -> str:
     except Exception as e:
         return f"Ошибка бинарника: {e}"
 
+def _detect_signature(path: str) -> bool:
+        """
+        Детекция подписи через YOLOv8s (обучена на 10k+ образцов подписей).
+        Возвращает True если найдена хотя бы одна подпись с confidence > 0.5
+        """
+        if _sig_model is None:
+            return False
+        try:
+            results = _sig_model(path, verbose=False)
+            for r in results:
+                for box in r.boxes:
+                    if float(box.conf[0]) > 0.5:
+                        return True
+        except Exception:
+            pass
+        return False
+
+def _detect_fingerprint(path: str) -> bool:
+        """
+        Детекция отпечатка пальца через SigLIP zero-shot классификацию.
+        Возвращает True если score класса "a fingerprint" > 0.7
+        """
+        if _fp_classifier is None:
+            return False
+        try:
+            results = _fp_classifier(path, candidate_labels=_fp_labels)
+            for r in results:
+                if r["label"] == "a fingerprint" and r["score"] > 0.7:
+                    return True
+        except Exception:
+            pass
+        return False
+
+def detect_biometry(path: str) -> list:
 def detect_biometry(path: str) -> list:
         """
         Комбинированная детекция биометрии:
-        - MediaPipe: лицо, глаза, силуэт тела (нейросеть)
-        - OpenCV: подпись и отпечаток пальца (эвристики)
-        Возвращает список найденных типов: ["лицо (2)", "глаза", "подпись"]
+        - MediaPipe: лицо, глаза, силуэт тела
+        - YOLOv8s: подпись
+        - SigLIP: отпечаток пальца
+        Возвращает список: ["лицо (2)", "глаза", "подпись"]
         """
         img = cv2.imread(path)
         if img is None:
@@ -240,9 +312,8 @@ def detect_biometry(path: str) -> list:
 
         found = []
         rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-        # Лицо + глаза (MediaPipe Face Detection)
+        # Лицо + глаза (MediaPipe)
         try:
             with mp_face_detection.FaceDetection(
                 model_selection=1, min_detection_confidence=0.5
@@ -252,7 +323,7 @@ def detect_biometry(path: str) -> list:
                     found.append(f"лицо ({len(results.detections)})")
                     for det in results.detections:
                         kp = det.location_data.relative_keypoints
-                        if len(kp) >= 2:  # правый глаз + левый глаз
+                        if len(kp) >= 2:
                             found.append("глаза")
                             break
         except Exception:
@@ -268,59 +339,21 @@ def detect_biometry(path: str) -> list:
         except Exception:
             pass
 
-        # Подпись (OpenCV эвристика контуров)
+        # Подпись (YOLOv8s) — принимает path, не gray
         try:
-            if _detect_signature(gray):
+            if _detect_signature(path):
                 found.append("подпись")
         except Exception:
             pass
 
-        # Отпечаток пальца (OpenCV Gabor-фильтры)
+        # Отпечаток пальца (SigLIP) — принимает path, не gray
         try:
-            if _detect_fingerprint(gray):
+            if _detect_fingerprint(path):
                 found.append("отпечаток пальца")
         except Exception:
             pass
 
         return found
-
-def _detect_signature(gray) -> bool:
-    """
-    Эвристика: ищем рукописную подпись в нижней трети изображения.
-    Подпись — это вытянутая горизонтально кривая линия, не заполненный прямоугольник.
-    """
-    h, w = gray.shape
-    bottom = gray[int(h * 0.65):, :]
-    if bottom.size == 0:
-        return False
-    _, binary = cv2.threshold(bottom, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    for c in contours:
-        x, y, cw, ch = cv2.boundingRect(c)
-        arc = cv2.arcLength(c, False)
-        area = cv2.contourArea(c)
-        if (cw > ch * 1.5
-                and 30 < cw < w * 0.6
-                and 5 < ch < h * 0.15
-                and arc > 50
-                and area < cw * ch * 0.5):
-            return True
-    return False
-
-def _detect_fingerprint(gray) -> bool:
-    """
-    Эвристика: детекция отпечатка пальца через Gabor-фильтры.
-    Отпечаток — полосатая текстура с сильным откликом по многим направлениям.
-    """
-    small = cv2.resize(gray, (300, 300))
-    responses = []
-    for theta in np.arange(0, np.pi, np.pi / 8):
-        kernel = cv2.getGaborKernel(
-            (21, 21), sigma=4.0, theta=theta, lambd=8.0, gamma=0.5, psi=0
-        )
-        filtered = cv2.filter2D(small, cv2.CV_8UC3, kernel)
-        responses.append(filtered.mean())
-    return sum(1 for r in responses if r > 30) >= 5
 
 ### Функция для парсинга одного файла
 
@@ -344,6 +377,11 @@ def worker_parse_file(file_data):
             # Используем вспомогательную функцию flatten_json (вынеси её тоже в корень)
             lines = flatten_json(data) 
             return idx, "\n".join(str(l) for l in lines).strip() or "ПУСТОЙ JSON"
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                data = json.load(f)
+            # Используем вспомогательную функцию flatten_json (вынеси её тоже в корень)
+            lines = flatten_json(data) 
+            return idx, "\n".join(str(l) for l in lines).strip() or "ПУСТОЙ JSON"
 
         elif engine == "rtf_engine":
             try:
@@ -352,11 +390,16 @@ def worker_parse_file(file_data):
                 # Предполагается наличие функции rtf_to_text
                 text = rtf_to_text(raw) 
                 return idx, text.strip() or "ПУСТОЙ RTF"
+                # Предполагается наличие функции rtf_to_text
+                text = rtf_to_text(raw) 
+                return idx, text.strip() or "ПУСТОЙ RTF"
             except Exception as e:
+                print(f"RTF не прочитан. Детали: {e}")
                 print(f"RTF не прочитан. Детали: {e}")
 
         elif engine == "doc_engine":
             try:
+                # Пробуем через antiword (внешняя утилита)
                 # Пробуем через antiword (внешняя утилита)
                 result = subprocess.run(
                     ["antiword", path], 
@@ -365,15 +408,28 @@ def worker_parse_file(file_data):
                     timeout=30,
                     encoding='utf-8', # явно указываем кодировку для Windows
                     errors='ignore'
+                    ["antiword", path], 
+                    capture_output=True, 
+                    text=True, 
+                    timeout=30,
+                    encoding='utf-8', # явно указываем кодировку для Windows
+                    errors='ignore'
                 )
                 
+                
                 if result.returncode == 0 and result.stdout.strip():
+                    return idx, result.stdout.strip()
                     return idx, result.stdout.strip()
                 else:
                     # Fallback: если antiword не выдал текст, читаем как бинарник
                     return idx, extract_binary(path)
                     
+                    # Fallback: если antiword не выдал текст, читаем как бинарник
+                    return idx, extract_binary(path)
+                    
             except FileNotFoundError:
+                # antiword не установлен в системе — используем встроенный бинарный парсер
+                return idx, extract_binary(path)
                 # antiword не установлен в системе — используем встроенный бинарный парсер
                 return idx, extract_binary(path)
             except Exception as e:
@@ -460,60 +516,189 @@ def worker_parse_file(file_data):
                 return idx, f"Ошибка таблицы: {str(e)}"
         
         ### Тяжеловесные
+                return idx, f"Ошибка DOC (бинарный парсинг): {e}"
+
+        elif engine == "docx_engine":
+
+            try:
+                # Открываем документ
+                doc = Document(path)
+                # Извлекаем текст из всех параграфов
+                text = "\n".join([p.text for p in doc.paragraphs])
+                
+                # Формируем результат
+                result_text = text.strip() if text.strip() else "ПУСТОЙ DOCX"
+                return idx, result_text
+                
+            except Exception as e:
+                # Возвращаем описание ошибки вместо падения процесса
+                return idx, f"Ошибка в чтении файла DOCx: {str(e)}"
+        
+        elif engine == "text_engine":
+
+            try:
+
+                with open(path, "r", encoding="utf-8", errors="ignore") as txt:
+                    content = txt.read().strip()
+                
+                return idx, content if content else "ПУСТОЙ ТЕКСТОВЫЙ ФАЙЛ"
+            except Exception as e:
+                return idx, f"Ошибка в чтении текстового формата: {str(e)}"
+
+        elif engine == "table_engine":
+
+            try:
+                import pandas as pd
+                tbl_ext = os.path.splitext(path)[1].lower()
+                tdf = None
+
+                # 1. Чтение таблиц разных форматов
+                if tbl_ext == ".csv":
+                    for sep in [",", ";", "\t", "|"]:
+                        try:
+                            tdf = pd.read_csv(path, sep=sep, dtype=str, on_bad_lines="skip", encoding_errors="ignore")
+                            if len(tdf.columns) > 1:
+                                break
+                        except:
+                            continue
+                    if tdf is None:
+                        tdf = pd.read_csv(path, dtype=str, on_bad_lines="skip", encoding_errors="ignore")
+
+                elif tbl_ext == ".tsv":
+                    tdf = pd.read_csv(path, sep="\t", dtype=str, on_bad_lines="skip", encoding_errors="ignore")
+
+                elif tbl_ext in (".xlsx", ".xls"):
+                    eng = "openpyxl" if tbl_ext == ".xlsx" else "xlrd"
+                    # Читаем все листы
+                    sheets = pd.read_excel(path, sheet_name=None, dtype=str, engine=eng)
+                    parts = []
+                    for sname, sdf in sheets.items():
+                        # Собираем заголовки и строки листа
+                        lines = [" ".join(str(c) for c in sdf.columns)]
+                        for _, r in sdf.iterrows():
+                            row_t = " ".join(str(v) for v in r.values if pd.notna(v))
+                            if row_t.strip():
+                                lines.append(row_t)
+                        if lines:
+                            parts.append(f"[{sname}]\n" + "\n".join(lines))
+                    
+                    return idx, "\n\n".join(parts) if parts else "ПУСТАЯ ТАБЛИЦА"
+
+                # 2. Обработка CSV/TSV после чтения
+                if tdf is not None:
+                    lines = [" ".join(str(c) for c in tdf.columns)]
+                    for _, r in tdf.iterrows():
+                        row_t = " ".join(str(v) for v in r.values if pd.notna(v))
+                        if row_t.strip():
+                            lines.append(row_t)
+                    return idx, "\n".join(lines) if lines else "ПУСТАЯ ТАБЛИЦА"
+                
+                return idx, "НЕ УДАЛОСЬ ПРОЧИТАТЬ ТАБЛИЦУ"
+
+            except Exception as e:
+                return idx, f"Ошибка таблицы: {str(e)}"
+        
+        ### Тяжеловесные
 
         elif engine == "pdf_engine":
             try:
-                import fitz
-                from PIL import Image
-                
+                # Порог количества символов.
+                # Если на странице больше 500 символов, считаем, что это текстовый документ,
+                # и биометрию (фото/подписи) искать не нужно.
+                TEXT_THRESHOLD = 500
+
                 with fitz.open(path) as doc:
-                    text = ""
-                    # 1. Пробуем извлечь текстовый слой
-                    for page in doc:
-                        text += page.get_text()
-
-                    # 2. OCR fallback для сканов (если текста меньше 50 символов на страницу)
-                    if len(text.strip()) / max(len(doc), 1) < 50:
-                        def ocr_page(page):
-                            pix = page.get_pixmap(matrix=fitz.Matrix(150/72, 150/72))
-                            img = Image.open(io.BytesIO(pix.tobytes("png")))
-                            return pytesseract.image_to_string(img, lang="rus+eng")
-
-                        # Внутри воркера (процесса) можно использовать потоки для ускорения OCR страниц
-                        with ThreadPoolExecutor(max_workers=4) as pool:
-                            results = list(pool.map(ocr_page, doc))
-                        text = "\n\n".join(r.strip() for r in results if r.strip())
                     
-                    # 3. Поиск биометрии на каждой странице
-                    bio_found = []
-                    for page_num, page in enumerate(doc):
-                        pix = page.get_pixmap(matrix=fitz.Matrix(150/72, 150/72))
-                        # Создаем временный файл для анализа картинки
-                        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-                            tmp.write(pix.tobytes("png"))
-                            tmp_path = tmp.name
-                        
+                    # --- Вспомогательная функция автоповорота ---
+                    def fix_rotation(img):
                         try:
-                            # Вызываем глобальную функцию детекции
-                            bio = detect_biometry(tmp_path) 
+                            osd = pytesseract.image_to_osd(img, config='--psm 0', lang='rus+eng', output_type=pytesseract.Output.DICT)
+                            angle = osd.get('rotate', 0)
+                            if angle != 0:
+                                img = img.rotate(-angle, expand=True)
+                        except pytesseract.TesseractError:
+                            pass
+                        return img
+                    # -------------------------------------------
+
+                    # --- Основная функция обработки страницы ---
+                    def process_page(page):
+                        # 1. Пытаемся получить текст из PDF (без OCR)
+                        # Используем "textdict" для более точного подсчета, если нужно, 
+                        # но get_text() тоже подойдет для оценки объема.
+                        raw_text = page.get_text()
+                        text_len = len(raw_text.strip())
+                        
+                        # Если текста очень много, пропускаем тяжелые проверки
+                        if text_len > TEXT_THRESHOLD:
+                            # Возвращаем текст, биометрия пустая
+                            return raw_text.strip(), ""
+
+                        # 2. Если текста мало, это может быть скан или пустая страница.
+                        # Делаем рендер, поворот и OCR.
+                        pix = page.get_pixmap(matrix=fitz.Matrix(150/72, 150/72))
+                        img = Image.open(io.BytesIO(pix.tobytes("png")))
+                        
+                        # Автоповорот
+                        img = fix_rotation(img)
+                        
+                        # Распознаем текст
+                        ocr_text = pytesseract.image_to_string(img, lang="rus+eng")
+                        ocr_text_len = len(ocr_text.strip())
+                        
+                        # Обновляем итоговый текст (берем либо raw, либо OCR, в зависимости от того, что нашли)
+                        # Логика: если raw был пустой, берем OCR. Если был небольшой, но OCR нашел больше - берем OCR.
+                        final_text = raw_text.strip()
+                        if ocr_text_len > text_len:
+                            final_text = ocr_text.strip()
+                        
+                        bio_info = ""
+                        
+                        # 3. Проверяем биометрию ТОЛЬКО если текста мало.
+                        # Если после OCR текста стало много (найден скрытый текст) — тоже пропускаем биометрию.
+                        if len(final_text) < TEXT_THRESHOLD:
+                            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                                img.save(tmp.name, format="PNG")
+                                tmp_path = tmp.name
+                            
+                            bio = detect_biometry(tmp_path)
                             if bio:
-                                bio_found.append(f"[БИОМЕТРИЯ стр.{page_num+1}: {', '.join(bio)}]")
-                        finally:
-                            if os.path.exists(tmp_path):
-                                os.unlink(tmp_path)
+                                bio_info = f"[БИОМЕТРИЯ стр.{page.number + 1}: {', '.join(bio)}]"
+                            
+                            os.unlink(tmp_path)
+                        
+                        return final_text, bio_info
 
-                    # 4. Формируем финальный результат
-                    final_content = text.strip()
-                    if bio_found:
-                        final_content += "\n" + "\n".join(bio_found)
+                    # Запускаем обработку в параллельных потоках
+                    with ThreadPoolExecutor(max_workers=4) as pool:
+                        results = list(pool.map(process_page, doc))
                     
-                    return idx, final_content if final_content else "ПУСТОЙ ПДФ"
+                    # Сборка результатов
+                    final_text_parts = []
+                    bio_results = []
+                    
+                    for text_part, bio_part in results:
+                        if text_part:
+                            final_text_parts.append(text_part)
+                        if bio_part:
+                            bio_results.append(bio_part)
 
+                    full_text = "\n\n".join(final_text_parts)
+                    if bio_results:
+                        full_text += "\n" + "\n".join(bio_results)
+
+                    df.at[idx, "Содержание"] = full_text.strip() if full_text.strip() else "ПУСТОЙ ПДФ"
             except Exception as e:
-                return idx, f"Ошибка PDF: {str(e)}"
+                df.at[idx, "Содержание"] = f"Ошибка PDF: {e}"
 
         elif engine == "whisper":
             try:
+                import whisper
+                # Загружаем модель внутри процесса. 
+                # "base" весит около 150Мб, это допустимо для параллелизма.
+                model = whisper.load_model("base") 
+
+                # Загрузка и обработка аудио
                 import whisper
                 # Загружаем модель внутри процесса. 
                 # "base" весит около 150Мб, это допустимо для параллелизма.
@@ -526,8 +711,13 @@ def worker_parse_file(file_data):
                 # Детекция языка
                 mel = whisper.log_mel_spectrogram(audio_segment).to(model.device)
                 _, probs = model.detect_language(mel)
+                # Детекция языка
+                mel = whisper.log_mel_spectrogram(audio_segment).to(model.device)
+                _, probs = model.detect_language(mel)
                 detected_language = max(probs, key=probs.get)
 
+                # Транскрибация
+                result = model.transcribe(path, language=detected_language)
                 # Транскрибация
                 result = model.transcribe(path, language=detected_language)
                 
@@ -535,17 +725,25 @@ def worker_parse_file(file_data):
                 if text:
                     # Добавляем метку биометрии, как и в других воркерах
                     return idx, text + "\n[БИОМЕТРИЯ: образец голоса]"
+                    # Добавляем метку биометрии, как и в других воркерах
+                    return idx, text + "\n[БИОМЕТРИЯ: образец голоса]"
                 else:
+                    return idx, "НИЧЕГО НЕ ИЗВЛЕЧЕНО (АУДИО ПУСТОЕ)"
                     return idx, "НИЧЕГО НЕ ИЗВЛЕЧЕНО (АУДИО ПУСТОЕ)"
 
             except Exception as e:
+                return idx, f"Произошел сбой при извлечении аудиодорожки: {str(e)}"
                 return idx, f"Произошел сбой при извлечении аудиодорожки: {str(e)}"
 
         elif engine == "image_ocr":
             try:
                 from PIL import Image
                 # Открываем изображение
+                from PIL import Image
+                # Открываем изображение
                 img = Image.open(path)
+                
+                # Приводим к совместимому формату для Tesseract
                 
                 # Приводим к совместимому формату для Tesseract
                 if img.mode not in ("L", "RGB"):
@@ -556,26 +754,40 @@ def worker_parse_file(file_data):
                 
                 # Запускаем детекцию лиц, подписей и т.д.
                 # Функция detect_biometry должна быть объявлена в корне файла
+                # Извлекаем текст
+                text = pytesseract.image_to_string(img, lang="rus+eng").strip()
+                
+                # Запускаем детекцию лиц, подписей и т.д.
+                # Функция detect_biometry должна быть объявлена в корне файла
                 bio = detect_biometry(path)
+                
                 
                 if bio:
                     text += f"\n[БИОМЕТРИЯ: {', '.join(bio)}]"
 
                 return idx, text if text else "OCR НЕ ИЗВЛЁК ТЕКСТ"
                 
+                return idx, text if text else "OCR НЕ ИЗВЛЁК ТЕКСТ"
+                
             except Exception as e:
+                return idx, f"Ошибка OCR: {str(e)}"
                 return idx, f"Ошибка OCR: {str(e)}"
 
         elif engine == "video_engine":
             try:
                 import whisper
+                import whisper
                 results = []
+                # Загружаем модель внутри процесса (лучше использовать маленькую для скорости)
+                v_model = whisper.load_model("base")
                 # Загружаем модель внутри процесса (лучше использовать маленькую для скорости)
                 v_model = whisper.load_model("base")
 
                 # 1. Извлекаем аудиодорожку через FFmpeg
+                # 1. Извлекаем аудиодорожку через FFmpeg
                 with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
                     tmp_audio = tmp.name
+                
                 
                 subprocess.run([
                     FFMPEG_PATH, "-i", path,
@@ -585,10 +797,15 @@ def worker_parse_file(file_data):
 
                 # 2. Транскрибация аудио
                 if os.path.exists(tmp_audio) and os.path.getsize(tmp_audio) > 1000:
+                # 2. Транскрибация аудио
+                if os.path.exists(tmp_audio) and os.path.getsize(tmp_audio) > 1000:
                     audio = whisper.load_audio(tmp_audio)
                     mel = whisper.log_mel_spectrogram(whisper.pad_or_trim(audio)).to(v_model.device)
                     _, probs = v_model.detect_language(mel)
+                    mel = whisper.log_mel_spectrogram(whisper.pad_or_trim(audio)).to(v_model.device)
+                    _, probs = v_model.detect_language(mel)
                     lang = max(probs, key=probs.get)
+                    res = v_model.transcribe(tmp_audio, language=lang)
                     res = v_model.transcribe(tmp_audio, language=lang)
                     if res["text"].strip():
                         results.append(res["text"].strip())
@@ -596,7 +813,12 @@ def worker_parse_file(file_data):
                 
                 if os.path.exists(tmp_audio):
                     os.unlink(tmp_audio)
+                        results.append("[БИОМЕТРИЯ: образец голоса]")
+                
+                if os.path.exists(tmp_audio):
+                    os.unlink(tmp_audio)
 
+                # 3. Нарезка кадров и OCR
                 # 3. Нарезка кадров и OCR
                 with tempfile.TemporaryDirectory() as tmpdir:
                     subprocess.run([
@@ -605,6 +827,9 @@ def worker_parse_file(file_data):
                         os.path.join(tmpdir, "f_%04d.jpg")
                     ], capture_output=True, timeout=180)
 
+                    prev_text = ""
+                    for f_name in sorted(os.listdir(tmpdir)):
+                        if not f_name.endswith(".jpg"):
                     prev_text = ""
                     for f_name in sorted(os.listdir(tmpdir)):
                         if not f_name.endswith(".jpg"):
@@ -625,12 +850,31 @@ def worker_parse_file(file_data):
                             results.append(f"[БИОМЕТРИЯ кадр {f_name}: {', '.join(bio)}]")
 
                 return idx, "\n".join(results) if results else "ВИДЕО: ТЕКСТ НЕ ИЗВЛЕЧЁН"
+                        
+                        frame_path = os.path.join(tmpdir, f_name)
+                        img = Image.open(frame_path)
+                        
+                        # OCR кадра
+                        t = pytesseract.image_to_string(img, lang="rus+eng").strip()
+                        if t and t != prev_text:
+                            results.append(t)
+                            prev_text = t
+                        
+                        # Биометрия кадра
+                        bio = detect_biometry(frame_path)
+                        if bio:
+                            results.append(f"[БИОМЕТРИЯ кадр {f_name}: {', '.join(bio)}]")
+
+                return idx, "\n".join(results) if results else "ВИДЕО: ТЕКСТ НЕ ИЗВЛЕЧЁН"
 
             except Exception as e:
+                return idx, f"Ошибка видео: {str(e)}"
                 return idx, f"Ошибка видео: {str(e)}"
 
         elif engine == "binary_engine":
             try:
+                import polars
+                # Читаем parquet файл
                 import polars
                 # Читаем parquet файл
                 temp = polars.read_parquet(path)
@@ -642,7 +886,15 @@ def worker_parse_file(file_data):
                     .to_series()
                     .to_list()
                 )
+                # Приводим все колонки к строковому типу и объединяем в текст
+                # Используем .sample или .head(1000), если файлы гигантские
+                raw_text = " ".join(
+                    temp.select(polars.all().cast(polars.Utf8))
+                    .to_series()
+                    .to_list()
+                )
                 
+                return idx, raw_text if raw_text.strip() else "БИНАРНЫЙ ФАЙЛ ПУСТ"
                 return idx, raw_text if raw_text.strip() else "БИНАРНЫЙ ФАЙЛ ПУСТ"
             
             except Exception as e:
@@ -668,7 +920,31 @@ def parsing(df, update_callback=None):
             df.at[res_idx, "Содержание"] = content
             if update_callback:
                 update_callback("Обработка...", i + 1, len(tasks))
+                return idx, f"Ошибка в чтении бинарника (Parquet). Детали: {e}"
+
+        return idx, f"Для файла {ext} был не найден движок."
+    except Exception as e:
+
+        print(f"При парсинге произошла ошибка. Детали: {e}")
+        return idx, f"При парсинге произошла ошибка. Детали: {e}", 
+
+def parsing(df, update_callback=None):
+
+    """
+    
+    """
+    tasks = [(idx, row["Путь"], row["Расширение"]) for idx, row in df.iterrows()]
+    
+    with concurrent.futures.ProcessPoolExecutor(max_workers=4) as executor:
+        futures = {executor.submit(worker_parse_file, t): t for t in tasks}
+        for i, f in enumerate(concurrent.futures.as_completed(futures)):
+            res_idx, content = f.result()
+            df.at[res_idx, "Содержание"] = content
+            if update_callback:
+                update_callback("Обработка...", i + 1, len(tasks))
     return df
+
+### Обработка результатов парсинга
 
 ### Обработка результатов парсинга
 
@@ -1441,6 +1717,7 @@ def evaluate_violations(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 ### Главная функция
+### Главная функция
 def run_scanning(path: str, update_callback = None)->pd.DataFrame:
 
     """
@@ -1477,8 +1754,12 @@ def run_scanning(path: str, update_callback = None)->pd.DataFrame:
     # --- Итог ---
     evaluated_df = evaluate_violations(categorized_df)
 
+
     time_step5 = time.time() - start_time
     print(f"\nВремя оценки нарушений: {round(time_step4, 2)} сек.")
+
+    evaluated_df.drop(columns=["Содержание"], inplace=True)
+    evaluated_df.reset_index(drop=True, inplace=True)
 
     evaluated_df.drop(columns=["Содержание"], inplace=True)
     evaluated_df.reset_index(drop=True, inplace=True)
@@ -1496,6 +1777,7 @@ def run_scanning(path: str, update_callback = None)->pd.DataFrame:
 
         conn.close()
 
+    print(evaluated_df["Категории"])
     print(evaluated_df["Категории"])
     # Итог
     total_time = time.time() - start_time
