@@ -9,10 +9,11 @@
 echo Starting Backend...
 
 call venv\Scripts\activate
+
 start /b python -m uvicorn compliance_scanner.main:app
 :: Фоново запускаем сервер с АПИ в этом же окне
-timeout /t 3
-:: Выжидаем 3 секунды
+timeout /t 10
+:: Выжидаем 10 секунд для установки весов модели для определения подписей/изображений
 
 echo Starting Frontend...
 python -m streamlit run frontend/app.py

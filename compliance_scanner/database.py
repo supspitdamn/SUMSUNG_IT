@@ -16,7 +16,7 @@ def get_connection():
 
     return conn
 
-def init_db():
+def init_db()->None:
 
     """
     Функция создает таблицу в случае, если ее еще нет
