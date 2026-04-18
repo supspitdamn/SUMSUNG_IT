@@ -4,7 +4,7 @@
     Лемза Семен - hoomas
     Панченко Даниил - papacapitan
 
-для запуска и тестирования в консоли пишем: pyhton -m uvicorn compliance_scanner.main:app --reload
+для запуска и тестирования в консоли пишем: python -m uvicorn compliance_scanner.main:app --reload
 для запуска и тестирования в удобном формате пишем:
 1) python -m uvicorn compliance_scanner.main:app --reload
 2) Не закрывая терминал с пунктом 1 (просто на плюсик возле терминала нажмите)
