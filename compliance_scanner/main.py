@@ -44,7 +44,7 @@ async def start_scan(path: str, background_tasks: BackgroundTasks):
     crud.clear_db()
     
     task_id = str(uuid.uuid4())
-    tasks[task_id] = {"status": "В процессе..."}
+    tasks[task_id] = {"status": "В процессе...", "current_file": "Инициализация работы..."}
 
     background_tasks.add_task(perform_analysis, task_id, path)
 
@@ -52,7 +52,8 @@ async def start_scan(path: str, background_tasks: BackgroundTasks):
     return {
         "task_id": task_id, 
         "status": "В процессе...", 
-        "message": "Начало сканирования"
+        "message": "Начало сканирования...",
+        "current_file": "Поиск файлов..."
     }
 
 ###
@@ -63,9 +64,14 @@ def perform_analysis(task_id: str, path: str) -> None:
     Запускается импортированная функция из scanner_logic.py для
     сканирования. По исходу формируется .json структура (построчно df)
     """
+
+    def update_callback(strochka: str = "") -> None:
+        tasks[task_id]["current_file"] = strochka
+
     try:
 
-        result_df = run_scanning(path)
+        result_df = run_scanning(path, update_callback=update_callback)
+        print(result_df)
         tasks[task_id] = {
             "Статус": "выполнено",
             "Результаты": result_df.to_dict(orient="records")
