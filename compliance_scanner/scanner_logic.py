@@ -12,7 +12,6 @@ import datetime
 
 import cv2
 import numpy as np
-import mediapipe as mp
 import io
 import tempfile
 import subprocess
@@ -26,9 +25,6 @@ FFPROBE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffprobe
 pytesseract.pytesseract.tesseract_cmd = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "tesseract", "tesseract.exe"
 )
-
-mp_face_detection = mp.solutions.face_detection
-mp_pose = mp.solutions.pose
 
 def is_file_accessible(path: str) -> bool:
     """
@@ -151,111 +147,111 @@ def parsing(df: pd.DataFrame) -> pd.DataFrame:
 
     # Вспомогательные функции детекции биометрии
 
-    def _detect_signature(gray) -> bool:
-        """
-        Эвристика: ищем рукописную подпись в нижней трети изображения.
-        Анализируем контуры — подпись это вытянутая кривая линия.
-        """
-        h, w = gray.shape
-        bottom = gray[int(h * 0.65):, :]
-        if bottom.size == 0:
-            return False
-        _, binary = cv2.threshold(bottom, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        for c in contours:
-            x, y, cw, ch = cv2.boundingRect(c)
-            arc = cv2.arcLength(c, False)
-            area = cv2.contourArea(c)
-            if (cw > ch * 1.5 and 30 < cw < w * 0.6
-                    and 5 < ch < h * 0.15 and arc > 50
-                    and area < cw * ch * 0.5):
-                return True
-        return False
+    # def _detect_signature(gray) -> bool:
+    #     """
+    #     Эвристика: ищем рукописную подпись в нижней трети изображения.
+    #     Анализируем контуры — подпись это вытянутая кривая линия.
+    #     """
+    #     h, w = gray.shape
+    #     bottom = gray[int(h * 0.65):, :]
+    #     if bottom.size == 0:
+    #         return False
+    #     _, binary = cv2.threshold(bottom, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    #     contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    #     for c in contours:
+    #         x, y, cw, ch = cv2.boundingRect(c)
+    #         arc = cv2.arcLength(c, False)
+    #         area = cv2.contourArea(c)
+    #         if (cw > ch * 1.5 and 30 < cw < w * 0.6
+    #                 and 5 < ch < h * 0.15 and arc > 50
+    #                 and area < cw * ch * 0.5):
+    #             return True
+    #     return False
 
-    def _detect_fingerprint(gray) -> bool:
-        """
-        Эвристика: детекция отпечатка пальца через Gabor-фильтры.
-        Отпечаток — это полосатая текстура с сильным откликом по многим направлениям.
-        """
-        small = cv2.resize(gray, (300, 300))
-        responses = []
-        for theta in np.arange(0, np.pi, np.pi / 8):
-            kernel = cv2.getGaborKernel((21, 21), sigma=4.0, theta=theta, lambd=8.0, gamma=0.5, psi=0)
-            filtered = cv2.filter2D(small, cv2.CV_8UC3, kernel)
-            responses.append(filtered.mean())
-        return sum(1 for r in responses if r > 30) >= 5
+    # def _detect_fingerprint(gray) -> bool:
+    #     """
+    #     Эвристика: детекция отпечатка пальца через Gabor-фильтры.
+    #     Отпечаток — это полосатая текстура с сильным откликом по многим направлениям.
+    #     """
+    #     small = cv2.resize(gray, (300, 300))
+    #     responses = []
+    #     for theta in np.arange(0, np.pi, np.pi / 8):
+    #         kernel = cv2.getGaborKernel((21, 21), sigma=4.0, theta=theta, lambd=8.0, gamma=0.5, psi=0)
+    #         filtered = cv2.filter2D(small, cv2.CV_8UC3, kernel)
+    #         responses.append(filtered.mean())
+    #     return sum(1 for r in responses if r > 30) >= 5
 
-    def detect_biometry(path: str) -> list:
-        """
-        Комбинированная детекция биометрии в изображении:
-        - MediaPipe: лицо, глаза, силуэт тела (нейросеть)
-        - OpenCV: подпись и отпечаток пальца (эвристики)
-        Возвращает список найденных типов, например: ["лицо (2)", "глаза", "подпись"]
-        """
-        img = cv2.imread(path)
-        if img is None:
-            return []
+    # def detect_biometry(path: str) -> list:
+    #     """
+    #     Комбинированная детекция биометрии в изображении:
+    #     - MediaPipe: лицо, глаза, силуэт тела (нейросеть)
+    #     - OpenCV: подпись и отпечаток пальца (эвристики)
+    #     Возвращает список найденных типов, например: ["лицо (2)", "глаза", "подпись"]
+    #     """
+    #     img = cv2.imread(path)
+    #     if img is None:
+    #         return []
 
-        found = []
-        rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    #     found = []
+    #     rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    #     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-        # Лицо + глаза (MediaPipe Face Detection)
-        try:
-            with mp_face_detection.FaceDetection(model_selection=1, min_detection_confidence=0.5) as detector:
-                results = detector.process(rgb)
-                if results.detections:
-                    found.append(f"лицо ({len(results.detections)})")
-                    for det in results.detections:
-                        kp = det.location_data.relative_keypoints
-                        if len(kp) >= 2:  # правый глаз + левый глаз
-                            found.append("глаза")
-                            break
-        except Exception:
-            pass
+    #     # Лицо + глаза (MediaPipe Face Detection)
+    #     try:
+    #         with mp_face_detection.FaceDetection(model_selection=1, min_detection_confidence=0.5) as detector:
+    #             results = detector.process(rgb)
+    #             if results.detections:
+    #                 found.append(f"лицо ({len(results.detections)})")
+    #                 for det in results.detections:
+    #                     kp = det.location_data.relative_keypoints
+    #                     if len(kp) >= 2:  # правый глаз + левый глаз
+    #                         found.append("глаза")
+    #                         break
+    #     except Exception:
+    #         pass
 
-        # Силуэт тела (MediaPipe Pose)
-        try:
-            with mp_pose.Pose(static_image_mode=True, min_detection_confidence=0.5) as pose:
-                if pose.process(rgb).pose_landmarks:
-                    found.append("силуэт тела")
-        except Exception:
-            pass
+    #     # Силуэт тела (MediaPipe Pose)
+    #     try:
+    #         with mp_pose.Pose(static_image_mode=True, min_detection_confidence=0.5) as pose:
+    #             if pose.process(rgb).pose_landmarks:
+    #                 found.append("силуэт тела")
+    #     except Exception:
+    #         pass
 
-        # Подпись (OpenCV эвристика контуров)
-        try:
-            if _detect_signature(gray):
-                found.append("подпись")
-        except Exception:
-            pass
+    #     # Подпись (OpenCV эвристика контуров)
+    #     try:
+    #         if _detect_signature(gray):
+    #             found.append("подпись")
+    #     except Exception:
+    #         pass
 
-        # Отпечаток пальца (OpenCV Gabor-фильтры)
-        try:
-            if _detect_fingerprint(gray):
-                found.append("отпечаток пальца")
-        except Exception:
-            pass
+    #     # Отпечаток пальца (OpenCV Gabor-фильтры)
+    #     try:
+    #         if _detect_fingerprint(gray):
+    #             found.append("отпечаток пальца")
+    #     except Exception:
+    #         pass
 
-        return found
+    #     return found
 
-    def extract_binary(path: str, min_length: int = 6) -> str:
-        """
-        Извлекает читаемые ASCII-строки из бинарного файла.
-        Нужно для поиска ПДн внутри .exe, .dll и других бинарников.
-        """
-        try:
-            with open(path, "rb") as f:
-                raw = f.read()
-            ascii_strings = re.findall(rb'[ -~]{%d,}' % min_length, raw)
-            result = []
-            for s in ascii_strings:
-                try:
-                    result.append(s.decode("ascii"))
-                except Exception:
-                    pass
-            return "\n".join(result) if result else "БИНАРНИК: ЧИТАЕМЫХ СТРОК НЕ НАЙДЕНО"
-        except Exception as e:
-            return f"Ошибка бинарника: {e}"
+    # def extract_binary(path: str, min_length: int = 6) -> str:
+    #     """
+    #     Извлекает читаемые ASCII-строки из бинарного файла.
+    #     Нужно для поиска ПДн внутри .exe, .dll и других бинарников.
+    #     """
+    #     try:
+    #         with open(path, "rb") as f:
+    #             raw = f.read()
+    #         ascii_strings = re.findall(rb'[ -~]{%d,}' % min_length, raw)
+    #         result = []
+    #         for s in ascii_strings:
+    #             try:
+    #                 result.append(s.decode("ascii"))
+    #             except Exception:
+    #                 pass
+    #         return "\n".join(result) if result else "БИНАРНИК: ЧИТАЕМЫХ СТРОК НЕ НАЙДЕНО"
+    #     except Exception as e:
+    #         return f"Ошибка бинарника: {e}"
 
     # Загрузка модели Whisper (один раз на весь парсинг)
 
