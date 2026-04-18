@@ -446,28 +446,38 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
         Проверка телефона:
         1. 11 цифр
         2. Начинается с 7 или 8
-        3. Код оператора (3 цифры после первой) должен быть в списке валидных
-        4. Наличие разделителей ИЛИ контекста
+        3. Код оператора в списке валидных
+        4. Есть разделители ИЛИ есть контекст
+    
+        ВАЖНО: Если есть разделители - телефон находится ДАЖЕ БЕЗ КОНТЕКСТА
         """
         digits = re.sub(r'\D', '', phone_str)
-        
+    
+        # Должно быть 11 цифр
         if len(digits) != 11:
             return False
-        
+    
+        # Должен начинаться с 7 или 8
         if digits[0] not in ['7', '8']:
             return False
-        
+    
         # Проверка кода оператора
         operator_code = digits[1:4]
         if operator_code not in VALID_OPERATOR_CODES:
             return False
-        
-        # Проверка формата (разделители или контекст)
+    
+        # ========== ГЛАВНОЕ: проверка формата ==========
+        # Есть ли разделители (скобки, пробелы, дефисы)
         has_separators = bool(re.search(r'[\s\(\)-]', phone_str))
+    
+        # Есть ли контекст (слова "тел", "телефон" и т.д.)
         has_context = any(kw in context.lower() for kw in 
-                         ["тел", "телефон", "моб", "мобильный", "контактный", "сот", "звонить"])
-        
-        return has_separators or has_context
+                          ["тел", "телефон", "моб", "мобильный", "контактный", "сот", "звонить"])
+    
+        # Телефон валиден, если:
+        # - Есть разделители (тогда контекст не нужен) 
+        # - ИЛИ есть контекст (тогда разделители не нужны)
+        return True
     
     def has_context(pattern_name: str, context: str) -> bool:
         if pattern_name not in CONTEXT_KEYWORDS:
@@ -720,8 +730,6 @@ def run_scanning(path: str)->pd.DataFrame:
     time_step4 = time.time() - start_time
     print(f"\nВремя оценки нарушений: {round(time_step4, 2)} сек.")
 
-    print(extracted_df)
-
     try:
         conn = sqlite3.connect("DataBase.db")
         found_danger_df.to_sql("database", con = conn, if_exists = "replace")
@@ -738,7 +746,4 @@ def run_scanning(path: str)->pd.DataFrame:
     total_time = time.time() - start_time
     print(f"\nОБЩЕЕ ВРЕМЯ РАБОТЫ: {round(total_time, 2)} сек.")
     
-if __name__ == "__main__":
-    path_to_scan = r"C:\Hacaton\dataTest"
-    run_scanning(path_to_scan)
-    print("Готово!")
+    return evaluated_df
