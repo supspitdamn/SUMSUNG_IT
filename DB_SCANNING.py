@@ -17,7 +17,6 @@ import io
 import tempfile
 import subprocess
 import pytesseract
-import polars
 from PIL import Image
 from concurrent.futures import ThreadPoolExecutor
 import re
