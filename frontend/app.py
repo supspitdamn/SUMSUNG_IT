@@ -60,8 +60,6 @@ def generate_markdown_report(quite_res, df_report):
     if df_report is not None and not df_report.empty:
         # Очистка текста для корректного отображения таблицы
         temp_df = df_report.copy()
-        if "Содержание" in temp_df.columns:
-            temp_df["Содержание"] = temp_df["Содержание"].str.replace(r'\s+', ' ', regex=True).str.slice(0, 150) + "..."
         
         md.append(temp_df.to_markdown(index=False))
     else:
