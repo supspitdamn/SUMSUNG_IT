@@ -34,7 +34,8 @@ def init_db():
                     "Расширение" TEXT,
                     "Дата создания" TEXT,
                     "Требуемый УЗ" REAL,
-                    "Найденные ПДн" TEXT
+                    "Найденные ПДн" TEXT,
+                    "Категории" TEXT
                 )
             """
     cursor.execute(queue)
