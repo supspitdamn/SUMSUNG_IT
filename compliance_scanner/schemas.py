@@ -31,7 +31,6 @@ class ScanResultSchema(BaseModel):
     Путь: str = Field()
     Расширение: str = Field()
     Дата_создания: str = Field(alias="Дата создания")
-    Содержание: str = Field()
     Требуемый_УЗ: float = Field(alias="Требуемый УЗ")
     Найденные_ПДн: str = Field(alias="Найденные ПДн")
     Категории: str

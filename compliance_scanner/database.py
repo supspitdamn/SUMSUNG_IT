@@ -33,9 +33,9 @@ def init_db():
                     "Путь" TEXT,
                     "Расширение" TEXT,
                     "Дата создания" TEXT,
-                    "Содержание" TEXT,
                     "Требуемый УЗ" REAL,
-                    "Найденные ПДн" TEXT
+                    "Найденные ПДн" TEXT,
+                    "Категории" TEXT
                 )
             """
     cursor.execute(queue)

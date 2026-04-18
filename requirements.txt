@@ -10,8 +10,6 @@ python-multipart     # Обработка форм и запросов
 
 ### Обработка данных и БД
 pandas               # Основной движок таблиц и CSV
-sqlalchemy           # (Если используется в database.py для ORM)
-sqlite3              # Встроено в Python (в файл писать не обязательно)
 
 ### Работа с API и сетью
 requests             # Запросы фронтенда к бэкенду
@@ -26,7 +24,13 @@ opencv-python        # Обработка кадров видео
 mediapipe            # Детекция лиц/объектов
 striprtf             # Чтение RTF файлов
 tabulate             # Конвертация DF в Markdown таблицы
+openpyxl
+ultralytics
+huggingface_hub
+transformers
+SentencePiece
 
 ### Вспомогательные
 typing-extensions    # Поддержка типов (Optional, List)
+polars
 

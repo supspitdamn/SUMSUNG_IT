@@ -125,3 +125,7 @@ async def get_all_from_db():
 async def get_pull_quite_from_db():
     info = crud.get_pull_quite()
     return info
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=False)
