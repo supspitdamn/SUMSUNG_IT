@@ -1,36 +1,32 @@
-# Web & API
-fastapi==0.110.0         # Сам наш апи
-uvicorn[standard]==0.27.1 # Дает ASGI-сервер. Для чтения порта и принятие запросов
-pydantic==2.6.3
+### Веб-интерфейс (Frontend)
+streamlit            # Интерфейс сканера
+matplotlib           # Визуализация (графики BARCHART/PIECHART)
 
-# Data
-pandas==2.2.1
+### Серверная часть (Backend)
+fastapi              # API сервер
+uvicorn[standard]    # Запуск сервера (ASGI)
+pydantic             # Валидация схем (ScanStatus/ScanResultSchema)
+python-multipart     # Обработка форм и запросов
 
-# Document Parsing
-pymupdf==1.23.26         # Для пдфки
-python-docx==1.1.0       # Для доксов
-openpyxl>=3.1            # .xlsx файлы
-xlrd>=2.0                # .xls файлы
-polars >= 1.0.0
+### Обработка данных и БД
+pandas               # Основной движок таблиц и CSV
+sqlalchemy           # (Если используется в database.py для ORM)
+sqlite3              # Встроено в Python (в файл писать не обязательно)
 
-# OCR & Images
-pytesseract==0.3.10
-Pillow==10.2.0
+### Работа с API и сетью
+requests             # Запросы фронтенда к бэкенду
 
-# AI & Audio
-openai-whisper==20231117
-torch                    
-numpy<2.0.0
+### Логика сканера (Scanner Engine)
+openai-whisper       # Транскрибация аудио
+pymupdf              # (import fitz) Обработка PDF
+python-docx          # Обработка Word (.docx)
+pytesseract          # OCR (распознавание текста с картинок)
+Pillow               # Работа с изображениями
+opencv-python        # Обработка кадров видео
+mediapipe            # Детекция лиц/объектов
+striprtf             # Чтение RTF файлов
+tabulate             # Конвертация DF в Markdown таблицы
 
-# Utilities
-python-dotenv==1.0.1
-
-# Биометерия
-opencv-python>=4.9
-mediapipe>=0.10.9
-
-# frontend
-streamlit==1.32.0
-requests==2.31.0
-matplotlib
+### Вспомогательные
+typing-extensions    # Поддержка типов (Optional, List)
 

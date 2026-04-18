@@ -32,7 +32,7 @@ class ScanResultSchema(BaseModel):
     Расширение: str = Field()
     Дата_создания: str = Field(alias="Дата создания")
     Содержание: str = Field()
-    Рейтинг_опасности: float = Field(alias="Рейтинг опасности")
+    Требуемый_УЗ: float = Field(alias="Требуемый УЗ")
     Найденные_ПДн: str = Field(alias="Найденные ПДн")
     Категории: str
 
@@ -49,6 +49,8 @@ class ScanStatus(BaseModel):
     status: str = Field(description="Текущее состояние сканирования")
     message: Optional[str] = Field(None, description="Дополнительное инфо от сервера")
     current_file: str
+    current_file_pos: int
+    total_files: int
 
 class PullQuite(BaseModel):
     """
