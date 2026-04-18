@@ -34,7 +34,7 @@ def get_all_results() -> list:
     try:
         queue = """
                     SELECT
-\                       *
+                       *
                     FROM
                         scan_results
                     ORDER BY
@@ -45,7 +45,7 @@ def get_all_results() -> list:
     
     except Exception as e:
 
-        print("Ошибка чтения БД: {e}")
+        print(f"Ошибка чтения БД: {e}")
         return []
     
     finally:
