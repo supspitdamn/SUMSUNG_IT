@@ -38,7 +38,7 @@ def get_all_results() -> list:
                     FROM
                         scan_results
                     ORDER BY
-                        [Рейтинг опасности] DESC
+                        [Требуемый УЗ] DESC
                 """
         df = pd.read_sql(queue, con = conn)
         return df.to_dict(orient="records")
@@ -66,10 +66,10 @@ def get_pull_quite() ->list:
             SELECT 
                 (SELECT COUNT(*) FROM scan_results) AS Просканированно,
                 [Имя файла] AS Самый_опасный_файл,
-                [Рейтинг опасности] AS Высшая_степень_опасности,
+                [Требуемый УЗ] AS Высшая_степень_опасности,
                 [Найденные ПДн] AS Детали
             FROM scan_results
-            ORDER BY [Рейтинг опасности] DESC
+            ORDER BY [Требуемый УЗ] DESC
             LIMIT 1
         """
 

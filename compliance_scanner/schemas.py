@@ -32,7 +32,7 @@ class ScanResultSchema(BaseModel):
     Расширение: str = Field()
     Дата_создания: str = Field(alias="Дата создания")
     Содержание: str = Field()
-    Рейтинг_опасности: float = Field(alias="Рейтинг опасности")
+    Требуемый_УЗ: float = Field(alias="Требуемый УЗ")
     Найденные_ПДн: str = Field(alias="Найденные ПДн")
     Категории: str
 
