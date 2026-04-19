@@ -18,3 +18,4 @@ test.py
 # ОС
 Thumbs.db
 .DS_Store
+venv
