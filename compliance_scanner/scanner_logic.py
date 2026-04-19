@@ -20,9 +20,7 @@ import cv2
 import numpy as np
 import re
 import mediapipe as mp
-
 from striprtf.striprtf import rtf_to_text
-
 import concurrent.futures
 import json
 
@@ -34,6 +32,7 @@ FFPROBE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffprobe
 pytesseract.pytesseract.tesseract_cmd = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "tesseract", "tesseract.exe"
 )
+
 
 VALID_BICS = set()
 BIC_TO_BANK_INFO = {}
@@ -144,7 +143,7 @@ def forming_table(root_dir: str = ".//") -> pd.DataFrame:
                     if not is_file_accessible(full_path):
 
                         raw_data.append({
-                            "Имя файла": os.path.splitext(name)[0].lower(),
+                            "Имя файла": os.path.splitext(name)[0],
                             "Путь": full_path,
                             "Расширение": os.path.splitext(name)[1].lower(),
                             "Дата создания": "НЕТ ДОСТУПА",
@@ -153,7 +152,7 @@ def forming_table(root_dir: str = ".//") -> pd.DataFrame:
                         continue 
 
                     ext = os.path.splitext(name)[1].lower() # ext[0] - имя файла, ext[1] - расширение
-                    name = os.path.splitext(name)[0].lower()
+                    name = os.path.splitext(name)[0]
                     date = os.path.getctime(full_path)
                     date = datetime.datetime.fromtimestamp(date).strftime('%Y-%m-%d %H:%M:%S')
                     
@@ -535,7 +534,7 @@ def worker_parse_file(file_data):
                 # Порог количества символов.
                 # Если на странице больше 500 символов, считаем, что это текстовый документ,
                 # и биометрию (фото/подписи) искать не нужно.
-                TEXT_THRESHOLD = 500
+                TEXT_THRESHOLD = 300
 
                 with fitz.open(path) as doc:
                     
@@ -617,7 +616,7 @@ def worker_parse_file(file_data):
                     if bio_results:
                         full_text += "\n" + "\n".join(bio_results)
 
-                return idx, content if content else "ПУСТОЙ ПДФ ФАЙЛ"
+                return idx, full_text if full_text else "ПУСТОЙ ПДФ ФАЙЛ"
             except Exception as e:
                 return idx, f"Ошибка в чтении пдф формата: {str(e)}"
 
@@ -793,41 +792,34 @@ def parsing(df, update_callback=None):
     return df
 
 ### Обработка результатов парсинга
-
 def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
     """
     функция seek_danger принимает на вход датафрейм с извлеченным текстом
     и возвращает датафрейм с измененной колонкой "найденные пдн".
-    
     Формат записи: "ТипПДн(количество),ТипПДн2(количество2)"
     Пример: "ФИО(3),Телефон(2),Паспорт(1)"
-    
     Канцеляризмы встроены непосредственно в паттерны поиска.
     Для специальных категорий используются списки допустимых значений.
     """
-    
     import re
     import datetime
     from collections import defaultdict
     import xml.etree.ElementTree as ET
-    
+
     # ========================================================================
     # 0. ЗАГРУЗКА СПРАВОЧНИКА БИК (при первом вызове)
     # ========================================================================
     if not hasattr(seek_danger, 'VALID_BICS'):
         seek_danger.VALID_BICS = set()
         seek_danger.BIC_TO_BANK_INFO = {}
-        
         try:
             tree = ET.parse("20260417_ED807_full.xml")
             root = tree.getroot()
             ns = {'ed': 'urn:cbr-ru:ed:v2.0'}
-            
             for bic_entry in root.findall('.//ed:BICDirectoryEntry', ns):
                 bic = bic_entry.get('BIC')
                 if bic:
                     seek_danger.VALID_BICS.add(bic)
-                    
                     participant = bic_entry.find('.//ed:ParticipantInfo', ns)
                     if participant is not None:
                         seek_danger.BIC_TO_BANK_INFO[bic] = {
@@ -835,23 +827,22 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
                             'region': participant.get('Rgn', ''),
                             'city': participant.get('Nnp', '')
                         }
-            
             print(f"Загружено {len(seek_danger.VALID_BICS)} БИК из справочника")
         except Exception as e:
             print(f"Ошибка загрузки справочника БИК: {e}")
-    
+
     # ========================================================================
-    # 1. ПАТТЕРНЫ ДЛЯ ПОИСКА (канцеляризм + захват значения)
+    # 1. ПАТТЕРНЫ ДЛЯ ПОИСКА
     # ========================================================================
     patterns = {
-        # ===== КОНТАКТНЫЕ ДАННЫЕ (определяются по формату) =====
+        # ===== КОНТАКТНЫЕ ДАННЫЕ =====
         "Телефон": r"(?:\+7|8)[\s\(-]?\d{3}[\s\)-]?\d{3}[\s-]?\d{2}[\s-]?\d{2}\b",
         "Email": r"[\w\.-]+@[\w\.-]+\.\w+",
         
         # ===== ГОСУДАРСТВЕННЫЕ ИДЕНТИФИКАТОРЫ =====
         "СНИЛС": r"\d{3}-\d{3}-\d{3}\s\d{2}\b",
         "ИНН": r"\b\d{10}\b|\b\d{12}\b",
-        "Паспорт": r"\b(?:паспорт|серия|выдан|кем\s+выдан|паспортные\s+данные)\b\s*:?\s*\d{2}\s?\d{2}\s?\d{6}\b",
+        "Паспорт": r"\b(?:паспорт|серия)\b.*?(\d{2}\s?\d{2}).*?(?:№|номер)?.*?(\d{6})\b",
         "Водительское удостоверение": r"[АВЕКМНОРСТУХ]{2}\d{6}\b",
         "MRZ": r"[A-Z0-9<]{44,88}",
         
@@ -859,13 +850,15 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
         "БИК": r"\b\d{9}\b",
         "Банковский счет": r"\b\d{20}\b",
         
-        # ===== ЛИЧНЫЕ ДАННЫЕ (канцеляризм + захват значения) =====
-        # ФИО: только с канцеляризмами (фамилия, имя, отчество, фио, гражданин)
-        "ФИО": r"\b(?:фамилия|имя|отчество|фио|ф\.и\.о\.|гражданин|гражданка)\b\s*:?\s*(?:[А-Я][а-я]+\s+[А-Я][а-я]+\s+[А-Я][а-я]+)",
+        # ===== ЛИЧНЫЕ ДАННЫЕ =====
+        # 10 ключевых слов для поиска ФИО (без попытки захватить само имя)
+        "ФИО": r"\b(?:фамилия|имя|отчество|фио|ф\.и\.о\.|гражданин|гражданка|пациент|клиент|сотрудник|получатель|заказчик|доверитель|представитель)\b",
         
-        "Дата рождения": r"\b(?:дата\s+рожд(?:ения)?|день\s+рождения|год\s+рождения|родился|родилась|г\.р\.|рожд)\b\s*:?\s*\b(?:0[1-9]|[12][0-9]|3[01])[./-](?:0[1-9]|1[0-2])[./-](?:19|20)\d{2}\b",
-        "Место рождения": r"\b(?:место\s+рожд(?:ения)?|родился|родилась|уроженец|уроженка|рожд)\b\s*:?\s*([А-Яа-я\s,\.]+)",
-        "Адрес регистрации": r"\b(?:адрес|зарегистрирован|проживает|прописка|место\s+жительства|место\s+регистрации|регистрация)\b\s*:?\s*(?:г\.|город|ул\.?|улица|пр\.|проспект|пер\.|переулок|д\.|дом|кв\.|квартира|к\.?)\s*[А-Яа-я0-9\s,\.-]+",
+        # Паттерн теперь ищет любую дату. Контекст проверяется ниже в основном цикле.
+        "Дата рождения": r"\b(?:0[1-9]|[12][0-9]|3[01])[./-](?:0[1-9]|1[0-2])[./-](?:19|20)\d{2}\b",
+        
+        # Универсальный паттерн любого адреса (места рождения, регистрации и т.д.)
+        "Адрес": r"\b(?:г\.|город|ул\.?|улица|пр\.|проспект|пер\.|переулок|д\.|дом|кв\.|квартира|к\.?|обл\.|область|край|район|р-н|пос\.|село|деревня)\s*[А-Яа-я0-9\s,\.-]+",
         
         # ===== ПЛАТЕЖНАЯ ИНФОРМАЦИЯ =====
         "Банковская карта": r"\b(?:\d{4}[- ]?){3}\d{4}\b",
@@ -878,16 +871,14 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
         "Медицина": r"\b(?:диагноз|заболевание|болезнь|анамнез|жалобы|лечение|терапия|мкб-\d+|рецепт|назначено|таблетки|дозировка|больница|поликлиника|медцентр|клиника|врач|медицинская\s+карта)\b",
         "Полис ОМС": r"\b(?:полис|омс|страховой\s+полис|медицинский\s+полис)\b\s*:?\s*\b\d{16}\b",
         
-        # ===== СПЕЦИАЛЬНЫЕ КАТЕГОРИИ ПДн (канцеляризм + захват значения) =====
+        # ===== СПЕЦИАЛЬНЫЕ КАТЕГОРИИ ПДн =====
         "Национальность": r"\b(?:национальность|нация|этнос|национальная\s+принадлежность)\b\s*:?\s*([А-Яа-я]+)",
         "Раса": r"\b(?:раса|расовая\s+принадлежность)\b\s*:?\s*([А-Яа-я]+)",
         "Религиозные убеждения": r"\b(?:религия|вероисповедание|вера|религиозные\s+взгляды)\b\s*:?\s*([А-Яа-я]+)",
         "Политические убеждения": r"\b(?:партия|политические\s+убеждения|полит\s+взгляды|политическая\s+принадлежность)\b\s*:?\s*([А-Яа-я]+)",
-        
-        # Судимость: канцеляризмы + значение (есть/нет)
         "Судимость": r"\b(?:судимость|судим|осужден|привлекался|уголовное\s+дело|несудим)\b\s*:?\s*(?:есть|нет|отсутствует|имеется|не\s+имеется)",
-
-        #Биометрия
+        
+        # ===== Биометрия =====
         "Биометрия: лицо": r"\[БИОМЕТРИЯ[^\]]*лицо",
         "Биометрия: глаза": r"\[БИОМЕТРИЯ[^\]]*глаза",
         "Биометрия: силуэт": r"\[БИОМЕТРИЯ[^\]]*силуэт",
@@ -895,12 +886,10 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
         "Биометрия: отпечаток": r"\[БИОМЕТРИЯ[^\]]*отпечаток",
         "Биометрия: голос": r"\[БИОМЕТРИЯ[^\]]*голос",
     }
-    
+
     # ========================================================================
-    # 2. СПИСКИ ДЛЯ ПРОВЕРКИ ЗНАЧЕНИЙ
+    # 2. СПИСКИ ДЛЯ ПРОВЕРКИ ЗНАЧЕНИЙ (оставлены без изменений)
     # ========================================================================
-    
-    # Список рас
     RACE_VALUES = {
         "европеоид", "европеоидная", "европеоидной", "европеоидную", "европеоидный",
         "кавказоид", "кавказоидная", "кавказоидной", "кавказоидную", "кавказоидный",
@@ -910,8 +899,6 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
         "австралоид", "австралоидная", "австралоидной", "австралоидную", "австралоидный",
         "американоид", "американоидная", "американоидной", "американоидную", "американоидный",
     }
-    
-    # Список национальностей РФ
     NATIONALITIES = {
         "русский", "русская", "татарин", "татарка", "украинец", "украинка",
         "башкир", "башкирка", "чуваш", "чувашка", "чеченец", "чеченка",
@@ -932,8 +919,6 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
         "болгарин", "болгарка", "грек", "гречанка", "цыган", "цыганка",
         "вьетнамец", "вьетнамка",
     }
-    
-    # Список религиозных убеждений
     RELIGIONS = {
         "православие", "православия", "православию",
         "христианство", "христианства", "христианству", "христианин", "христианка",
@@ -946,8 +931,6 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
         "атеист", "атеистка", "атеизм",
         "агностик", "агностицизм"
     }
-    
-    # Список политических убеждений
     POLITICAL_VIEWS = {
         "коммунист", "коммунистические", "либерал", "либеральные",
         "консерватор", "консервативные", "социал-демократ", "социал-демократические",
@@ -958,9 +941,6 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
         "аполитичный", "нейтральные", "не определился"
     }
     
-    # ========================================================================
-    # 3. ВАЛИДНЫЕ КОДЫ ОПЕРАТОРОВ РФ
-    # ========================================================================
     VALID_OPERATOR_CODES = {
         "900", "901", "902", "903", "904", "905", "906", "908", "909",
         "910", "911", "912", "913", "914", "915", "916", "917", "918", "919",
@@ -973,11 +953,10 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
         "980", "981", "982", "983", "984", "985", "986", "987", "988", "989",
         "990", "991", "992", "993", "994", "995", "996", "997", "999"
     }
-    
+
     # ========================================================================
-    # 4. ФУНКЦИИ ВАЛИДАЦИИ
+    # 3. ФУНКЦИИ ВАЛИДАЦИИ (Место рождения удалено, остальное без изменений)
     # ========================================================================
-    
     def is_valid_snils(snils_str: str) -> bool:
         digits = re.sub(r'\D', '', snils_str)
         if len(digits) != 11 or digits == "00000000000":
@@ -987,7 +966,7 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
         if check == 100:
             check = 0
         return check == int(digits[9:])
-    
+        
     def is_valid_inn(inn_str: str) -> bool:
         if not inn_str.isdigit():
             return False
@@ -1014,7 +993,7 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
                 check2 = 0
             return check2 == int(inn_str[11])
         return False
-    
+        
     def is_valid_phone(phone_str: str) -> bool:
         digits = re.sub(r'\D', '', phone_str)
         if len(digits) != 11:
@@ -1023,7 +1002,7 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
             return False
         operator_code = digits[1:4]
         return operator_code in VALID_OPERATOR_CODES
-    
+        
     def is_valid_driver_license(license_str: str) -> bool:
         VALID_LETTERS = set("АВЕКМНОРСТУХ")
         if len(license_str) != 8:
@@ -1034,7 +1013,7 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
         if not license_str[2:].isdigit():
             return False
         return True
-    
+        
     def is_valid_mrz(mrz_str: str) -> bool:
         mrz_clean = mrz_str.replace(' ', '').replace('\n', '').replace('\r', '')
         if len(mrz_clean) not in [44, 88]:
@@ -1042,7 +1021,7 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
         if not re.match(r'^[A-Z0-9<]+$', mrz_clean):
             return False
         return True
-    
+        
     def is_valid_card_number(card_str: str) -> bool:
         digits = re.sub(r'[\s-]', '', card_str)
         if not digits.isdigit() or len(digits) != 16:
@@ -1056,19 +1035,18 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
                     num -= 9
             total += num
         return total % 10 == 0
-    
+        
     def is_valid_bic(bic_str: str) -> bool:
         if not bic_str.isdigit() or len(bic_str) != 9:
             return False
         if not bic_str.startswith('04'):
             return False
         return bic_str in seek_danger.VALID_BICS
-    
+        
     def is_valid_bank_account(account_str: str, bic_str: str = None) -> tuple:
         digits = re.sub(r'\D', '', account_str)
         if len(digits) != 20:
             return (False, "не 20 цифр")
-        
         if bic_str and bic_str in seek_danger.VALID_BICS:
             bank_code = bic_str[-3:]
             check_string = bank_code + digits
@@ -1080,19 +1058,16 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
                 return (True, "OK")
             else:
                 return (False, "контрольная сумма не совпадает")
-        
         return (False, "нет БИК для проверки")
-    
+        
     def is_valid_date(date_str: str) -> tuple:
         date_formats = [
             r'(\d{2})\.(\d{2})\.(\d{4})',
             r'(\d{2})/(\d{2})/(\d{4})',
             r'(\d{2})-(\d{2})-(\d{4})',
         ]
-        
         day, month, year = None, None, None
         parsed = False
-        
         for fmt in date_formats:
             match = re.search(fmt, date_str)
             if match:
@@ -1101,7 +1076,6 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
                 year = int(match.group(3))
                 parsed = True
                 break
-        
         if not parsed:
             match = re.search(r'(\d{2})(\d{2})(\d{4})', date_str)
             if match:
@@ -1109,70 +1083,50 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
                 month = int(match.group(2))
                 year = int(match.group(3))
                 parsed = True
-        
         if not parsed:
             return (False, "неверный формат даты")
-        
         try:
             datetime.date(year, month, day)
         except ValueError:
             return (False, "несуществующая дата")
-        
         if year < 1900 or year > 2025:
             return (False, "год вне диапазона")
-        
         return (True, "OK")
-    
+        
     def is_valid_cvv(cvv_str: str) -> bool:
         digits = re.sub(r'\D', '', cvv_str)
         return len(digits) == 3 and digits.isdigit()
-    
-    def is_valid_oms_policy(policy_str: str) -> bool:
-        """
-        Проверка полиса ОМС по контрольной сумме.
-        Формат: 16 цифр.
-        Контрольная сумма: сумма произведений цифр на веса (1,3,1,3,...) должна быть кратна 10.
-        """
-        digits = re.sub(r'\D', '', policy_str)
         
+    def is_valid_oms_policy(policy_str: str) -> bool:
+        digits = re.sub(r'\D', '', policy_str)
         if len(digits) != 16:
             return False
-        
         weights = [1, 3, 1, 3, 1, 3, 1, 3, 1, 3, 1, 3, 1, 3, 1, 3]
-        
         total = 0
         for i, digit in enumerate(digits):
             total += int(digit) * weights[i]
-        
         return total % 10 == 0
-    
+        
     def is_valid_race(race_str: str) -> bool:
-        race_lower = race_str.lower().strip()
-        return race_lower in RACE_VALUES
-    
+        return race_str.lower().strip() in RACE_VALUES
+        
     def is_valid_nationality(nationality_str: str) -> bool:
-        nationality_lower = nationality_str.lower().strip()
-        return nationality_lower in NATIONALITIES
-    
+        return nationality_str.lower().strip() in NATIONALITIES
+        
     def is_valid_religion(religion_str: str) -> bool:
-        religion_lower = religion_str.lower().strip()
-        return religion_lower in RELIGIONS
-    
+        return religion_str.lower().strip() in RELIGIONS
+        
     def is_valid_political_view(view_str: str) -> bool:
-        view_lower = view_str.lower().strip()
-        return view_lower in POLITICAL_VIEWS
-    
-    def is_valid_birth_place(place_str: str) -> bool:
-        return bool(place_str and len(place_str.strip()) >= 2)
-    
+        return view_str.lower().strip() in POLITICAL_VIEWS
+
     # ========================================================================
-    # 5. ОСНОВНОЙ ЦИКЛ
+    # 4. ОСНОВНОЙ ЦИКЛ
     # ========================================================================
     for idx, row in df.iterrows():
         if str(row["Содержание"]).split(" ")[0] == "Ошибка":
             df.at[idx, "Найденные ПДн"] = "Нет никаких нарушений"
             continue
-        
+            
         info = str(row["Содержание"])
         info_lower = info.lower()
         pd_count = defaultdict(int)
@@ -1187,22 +1141,21 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
                     'position': match.start(),
                     'end': match.end()
                 })
-        
+                
         for pattern_name, pattern in patterns.items():
-            # Для регистронезависимых паттернов используем нижний регистр
-            if pattern_name in ["ФИО", "Адрес регистрации", "Заработная плата", "Медицина",
-                                "Место рождения", "Национальность", "Раса", "Религиозные убеждения",
-                                "Политические убеждения", "Судимость", "Дата рождения", "Паспорт",
-                                "CVV", "Полис ОМС"]:
+            # Обновлен список категорий для поиска в нижнем регистре
+            if pattern_name in ["ФИО", "Адрес", "Заработная плата", "Медицина",
+                                "Национальность", "Раса", "Религиозные убеждения",
+                                "Политические убеждения", "Судимость", "Дата рождения", 
+                                "Паспорт", "CVV", "Полис ОМС"]:
                 text_to_search = info_lower
             else:
                 text_to_search = info
-            
+                
             for match in re.finditer(pattern, text_to_search, re.IGNORECASE):
                 match_text = match.group()
                 start_pos = match.start()
                 end_pos = match.end()
-                
                 valid = True
                 
                 # Валидация по типам
@@ -1227,56 +1180,52 @@ def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
                             nearby_bic = bic_info['bic']
                             break
                     valid, _ = is_valid_bank_account(match_text, nearby_bic)
+                    
+                # Интеллектуальный поиск Даты Рождения с окном ±300 символов
                 elif pattern_name == "Дата рождения":
-                    valid, _ = is_valid_date(match_text)
+                    is_date_valid, _ = is_valid_date(match_text)
+                    if is_date_valid:
+                        window_start = max(0, start_pos - 300)
+                        window_end = min(len(text_to_search), end_pos + 300)
+                        window_text = text_to_search[window_start:window_end]
+                        dob_keywords = ['дата рожд', 'день рожд', 'год рожд', 'родился', 'родилась', 'г.р.', 'рожд', 'уроженец', 'уроженка']
+                        
+                        if any(kw in window_text for kw in dob_keywords):
+                            valid = True
+                        else:
+                            valid = False
+                    else:
+                        valid = False
+                        
                 elif pattern_name == "CVV":
                     valid = is_valid_cvv(match_text)
                 elif pattern_name == "Полис ОМС":
                     valid = is_valid_oms_policy(match_text)
                 elif pattern_name == "Раса":
                     race_match = re.search(r'([А-Яа-я]+)', match_text)
-                    if race_match:
-                        valid = is_valid_race(race_match.group(1))
-                    else:
-                        valid = False
+                    valid = is_valid_race(race_match.group(1)) if race_match else False
                 elif pattern_name == "Национальность":
                     nationality_match = re.search(r'([А-Яа-я]+)', match_text)
-                    if nationality_match:
-                        valid = is_valid_nationality(nationality_match.group(1))
-                    else:
-                        valid = False
+                    valid = is_valid_nationality(nationality_match.group(1)) if nationality_match else False
                 elif pattern_name == "Религиозные убеждения":
                     religion_match = re.search(r'([А-Яа-я]+)', match_text)
-                    if religion_match:
-                        valid = is_valid_religion(religion_match.group(1))
-                    else:
-                        valid = False
+                    valid = is_valid_religion(religion_match.group(1)) if religion_match else False
                 elif pattern_name == "Политические убеждения":
                     view_match = re.search(r'([А-Яа-я]+)', match_text)
-                    if view_match:
-                        valid = is_valid_political_view(view_match.group(1))
-                    else:
-                        valid = False
-                elif pattern_name == "Место рождения":
-                    place_match = re.search(r'([А-Яа-я\s,\.]+)$', match_text)
-                    if place_match:
-                        valid = is_valid_birth_place(place_match.group(1))
-                    else:
-                        valid = False
-                elif pattern_name in ["ФИО", "Паспорт", "Адрес регистрации",
-                                      "Заработная плата", "Медицина", "Судимость"]:
+                    valid = is_valid_political_view(view_match.group(1)) if view_match else False
+                elif pattern_name in ["ФИО", "Паспорт", "Адрес", "Заработная плата", "Медицина", "Судимость"]:
                     valid = True
-                
+                    
                 if valid:
                     pd_count[pattern_name] += 1
                     break
-        
+                    
         if pd_count:
             result_parts = [f"{pd_type}({count})" for pd_type, count in pd_count.items()]
             df.at[idx, "Найденные ПДн"] = ",".join(result_parts)
         else:
-            df.at[idx, "Найденные ПДн"] = "Нет никаких нарушений"
-    
+            df.at[idx, "Найденные ПДн"] = "Нет никаких нарушений"       
+
     return df
 
 def categories(df: pd.DataFrame) -> pd.DataFrame:
@@ -1296,8 +1245,7 @@ def categories(df: pd.DataFrame) -> pd.DataFrame:
         "Телефон",
         "Email",
         "Дата рождения",
-        "Место рождения",
-        "Адрес регистрации",
+        "Адрес",
     }
     
     # ========================================================================
