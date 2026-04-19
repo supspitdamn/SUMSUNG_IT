@@ -792,585 +792,513 @@ def parsing(df, update_callback=None):
     return df
 
 ### Обработка результатов парсинга
-def seek_danger(df: pd.DataFrame) -> pd.DataFrame:
+### Обработка результатов парсинга
+def seek_danger(df: pd.DataFrame, update_callback=None) -> pd.DataFrame:
     """
-    функция seek_danger принимает на вход датафрейм с извлеченным текстом
-    и возвращает датафрейм с измененной колонкой "найденные пдн".
-    Формат записи: "ТипПДн(количество),ТипПДн2(количество2)"
-    Пример: "ФИО(3),Телефон(2),Паспорт(1)"
-    Канцеляризмы встроены непосредственно в паттерны поиска.
-    Для специальных категорий используются списки допустимых значений.
+    Гибридный подход: sentence-embeddings + кластеризация + regex-якоря.
+    
+    Этап 1: Regex находит «якорные» файлы с железобетонными ПДн (СНИЛС, паспорт, биометрия).
+    Этап 2: Все тексты прогоняются через sentence-transformer → эмбеддинги.
+    Этап 3: Считаем косинусное сходство каждого файла с якорями.
+             Если файл похож на якорный — помечаем как кандидат.
+    Этап 4: Для кандидатов запускаем детальный regex для определения типов ПДн.
     """
     import re
-    import datetime
+    import numpy as np
     from collections import defaultdict
-    import xml.etree.ElementTree as ET
+    from sentence_transformers import SentenceTransformer
+    from sklearn.metrics.pairwise import cosine_similarity
 
     # ========================================================================
-    # 0. ЗАГРУЗКА СПРАВОЧНИКА БИК (при первом вызове)
+    # 0. ИНИЦИАЛИЗАЦИЯ МОДЕЛИ (один раз)
     # ========================================================================
-    if not hasattr(seek_danger, 'VALID_BICS'):
-        seek_danger.VALID_BICS = set()
-        seek_danger.BIC_TO_BANK_INFO = {}
-        try:
-            tree = ET.parse("20260417_ED807_full.xml")
-            root = tree.getroot()
-            ns = {'ed': 'urn:cbr-ru:ed:v2.0'}
-            for bic_entry in root.findall('.//ed:BICDirectoryEntry', ns):
-                bic = bic_entry.get('BIC')
-                if bic:
-                    seek_danger.VALID_BICS.add(bic)
-                    participant = bic_entry.find('.//ed:ParticipantInfo', ns)
-                    if participant is not None:
-                        seek_danger.BIC_TO_BANK_INFO[bic] = {
-                            'name': participant.get('NameP', ''),
-                            'region': participant.get('Rgn', ''),
-                            'city': participant.get('Nnp', '')
-                        }
-            print(f"Загружено {len(seek_danger.VALID_BICS)} БИК из справочника")
-        except Exception as e:
-            print(f"Ошибка загрузки справочника БИК: {e}")
+    if not hasattr(seek_danger, '_model'):
+        print("Загрузка sentence-transformer...")
+        # Лёгкая мультиязычная модель, ~120MB, быстрая
+        seek_danger._model = SentenceTransformer(
+            'sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2'
+        )
+        print("Модель загружена")
+
+    model = seek_danger._model
 
     # ========================================================================
-    # 1. ПАТТЕРНЫ ДЛЯ ПОИСКА
+    # 1. ВАЛИДАТОРЫ
     # ========================================================================
-    patterns = {
-        # ===== КОНТАКТНЫЕ ДАННЫЕ =====
-        "Телефон": r"(?:\+7|8)[\s\(-]?\d{3}[\s\)-]?\d{3}[\s-]?\d{2}[\s-]?\d{2}\b",
-        "Email": r"[\w\.-]+@[\w\.-]+\.\w+",
-        
-        # ===== ГОСУДАРСТВЕННЫЕ ИДЕНТИФИКАТОРЫ =====
-        "СНИЛС": r"\d{3}-\d{3}-\d{3}\s\d{2}\b",
-        "ИНН": r"\b\d{10}\b|\b\d{12}\b",
-        "Паспорт": r"\b(?:паспорт|серия)\b.*?(\d{2}\s?\d{2}).*?(?:№|номер)?.*?(\d{6})\b",
-        "Водительское удостоверение": r"[АВЕКМНОРСТУХ]{2}\d{6}\b",
-        "MRZ": r"[A-Z0-9<]{44,88}",
-        
-        # ===== БАНКОВСКИЕ РЕКВИЗИТЫ =====
-        "БИК": r"\b\d{9}\b",
-        "Банковский счет": r"\b\d{20}\b",
-        
-        # ===== ЛИЧНЫЕ ДАННЫЕ =====
-        # 10 ключевых слов для поиска ФИО (без попытки захватить само имя)
-        "ФИО": r"\b(?:фамилия|имя|отчество|фио|ф\.и\.о\.|гражданин|гражданка|пациент|клиент|сотрудник|получатель|заказчик|доверитель|представитель)\b",
-        
-        # Паттерн теперь ищет любую дату. Контекст проверяется ниже в основном цикле.
-        "Дата рождения": r"\b(?:0[1-9]|[12][0-9]|3[01])[./-](?:0[1-9]|1[0-2])[./-](?:19|20)\d{2}\b",
-        
-        # Универсальный паттерн любого адреса (места рождения, регистрации и т.д.)
-        "Адрес": r"\b(?:г\.|город|ул\.?|улица|пр\.|проспект|пер\.|переулок|д\.|дом|кв\.|квартира|к\.?|обл\.|область|край|район|р-н|пос\.|село|деревня)\s*[А-Яа-я0-9\s,\.-]+",
-        
-        # ===== ПЛАТЕЖНАЯ ИНФОРМАЦИЯ =====
-        "Банковская карта": r"\b(?:\d{4}[- ]?){3}\d{4}\b",
-        "CVV": r"(?:cvv|cvc|код\s+безопасности|код\s+карты|cvv2/cvc2|код\s+cvv|cvv\s+код)\s*:?\s*\d{3}\b",
-        
-        # ===== ФИНАНСОВЫЕ ДАННЫЕ =====
-        "Заработная плата": r"\b(?:зарплата|оклад|доход|зп|заработная\s+плата|ежемесячный\s+доход|среднемесячный\s+доход)\b\s*:?\s*\d+",
-        
-        # ===== МЕДИЦИНСКИЕ ДАННЫЕ =====
-        "Медицина": r"\b(?:диагноз|заболевание|болезнь|анамнез|жалобы|лечение|терапия|мкб-\d+|рецепт|назначено|таблетки|дозировка|больница|поликлиника|медцентр|клиника|врач|медицинская\s+карта)\b",
-        "Полис ОМС": r"\b(?:полис|омс|страховой\s+полис|медицинский\s+полис)\b\s*:?\s*\b\d{16}\b",
-        
-        # ===== СПЕЦИАЛЬНЫЕ КАТЕГОРИИ ПДн =====
-        "Национальность": r"\b(?:национальность|нация|этнос|национальная\s+принадлежность)\b\s*:?\s*([А-Яа-я]+)",
-        "Раса": r"\b(?:раса|расовая\s+принадлежность)\b\s*:?\s*([А-Яа-я]+)",
-        "Религиозные убеждения": r"\b(?:религия|вероисповедание|вера|религиозные\s+взгляды)\b\s*:?\s*([А-Яа-я]+)",
-        "Политические убеждения": r"\b(?:партия|политические\s+убеждения|полит\s+взгляды|политическая\s+принадлежность)\b\s*:?\s*([А-Яа-я]+)",
-        "Судимость": r"\b(?:судимость|судим|осужден|привлекался|уголовное\s+дело|несудим)\b\s*:?\s*(?:есть|нет|отсутствует|имеется|не\s+имеется)",
-        
-        # ===== Биометрия =====
-        "Биометрия: лицо": r"\[БИОМЕТРИЯ[^\]]*лицо",
-        "Биометрия: глаза": r"\[БИОМЕТРИЯ[^\]]*глаза",
-        "Биометрия: силуэт": r"\[БИОМЕТРИЯ[^\]]*силуэт",
-        "Биометрия: подпись": r"\[БИОМЕТРИЯ[^\]]*подпись",
-        "Биометрия: отпечаток": r"\[БИОМЕТРИЯ[^\]]*отпечаток",
-        "Биометрия: голос": r"\[БИОМЕТРИЯ[^\]]*голос",
-    }
-
-    # ========================================================================
-    # 2. СПИСКИ ДЛЯ ПРОВЕРКИ ЗНАЧЕНИЙ (оставлены без изменений)
-    # ========================================================================
-    RACE_VALUES = {
-        "европеоид", "европеоидная", "европеоидной", "европеоидную", "европеоидный",
-        "кавказоид", "кавказоидная", "кавказоидной", "кавказоидную", "кавказоидный",
-        "монголоид", "монголоидная", "монголоидной", "монголоидную", "монголоидный",
-        "негроид", "негроидная", "негроидной", "негроидную", "негроидный",
-        "экваториальная", "экваториальной", "экваториальную",
-        "австралоид", "австралоидная", "австралоидной", "австралоидную", "австралоидный",
-        "американоид", "американоидная", "американоидной", "американоидную", "американоидный",
-    }
-    NATIONALITIES = {
-        "русский", "русская", "татарин", "татарка", "украинец", "украинка",
-        "башкир", "башкирка", "чуваш", "чувашка", "чеченец", "чеченка",
-        "армянин", "армянка", "азербайджанец", "азербайджанка",
-        "мордвин", "мордовка", "казах", "казашка", "белорус", "белоруска",
-        "узбек", "узбечка", "таджик", "таджичка", "киргиз", "киргизка",
-        "грузин", "грузинка", "молдаванин", "молдаванка", "немец", "немка",
-        "еврей", "еврейка", "кореец", "кореянка", "китаец", "китаянка",
-        "осетин", "осетинка", "якут", "якутка", "бурят", "бурятка",
-        "ингуш", "ингушка", "лезгин", "лезгинка", "калмык", "калмычка",
-        "аварец", "аварка", "даргинец", "даргинка", "кумык", "кумычка",
-        "кабардинец", "кабардинка", "адыгеец", "адыгейка", "карачаевец", "карачаевка",
-        "балкарец", "балкарка", "ногаец", "ногайка", "черкес", "черкешенка",
-        "абхаз", "абхазка", "тувинец", "тувинка", "хакас", "хакаска",
-        "алтаец", "алтайка", "мариец", "марийка", "удмурт", "удмуртка",
-        "коми", "карел", "карелка", "финн", "финка", "эстонец", "эстонка",
-        "латыш", "латышка", "литовец", "литовка", "поляк", "полька",
-        "болгарин", "болгарка", "грек", "гречанка", "цыган", "цыганка",
-        "вьетнамец", "вьетнамка",
-    }
-    RELIGIONS = {
-        "православие", "православия", "православию",
-        "христианство", "христианства", "христианству", "христианин", "христианка",
-        "ислам", "ислама", "исламу", "исламом", "мусульманин", "мусульманка",
-        "буддизм", "буддизма", "буддизму", "буддизмом",
-        "иудаизм", "иудаизма", "иудаизму", "иудаизмом",
-        "католицизм", "католицизма", "католицизму", "католицизмом",
-        "протестантизм", "протестантство",
-        "индуизм", "индуизма", "индуизму", "индуизмом",
-        "атеист", "атеистка", "атеизм",
-        "агностик", "агностицизм"
-    }
-    POLITICAL_VIEWS = {
-        "коммунист", "коммунистические", "либерал", "либеральные",
-        "консерватор", "консервативные", "социал-демократ", "социал-демократические",
-        "националист", "националистические", "анархист", "анархические",
-        "социалист", "социалистические", "демократ", "демократические",
-        "монархист", "монархические", "фашист", "фашистские",
-        "зеленые", "экологические", "центрист", "центристские",
-        "аполитичный", "нейтральные", "не определился"
-    }
-    
     VALID_OPERATOR_CODES = {
-        "900", "901", "902", "903", "904", "905", "906", "908", "909",
-        "910", "911", "912", "913", "914", "915", "916", "917", "918", "919",
-        "920", "921", "922", "923", "924", "925", "926", "927", "928", "929",
-        "930", "931", "932", "933", "934", "936", "937", "938", "939",
-        "941", "942", "949",
-        "950", "951", "952", "953", "954", "955", "958", "959",
-        "960", "961", "962", "963", "964", "965", "966", "967", "968", "969",
-        "970", "971", "977", "978", "979",
-        "980", "981", "982", "983", "984", "985", "986", "987", "988", "989",
-        "990", "991", "992", "993", "994", "995", "996", "997", "999"
+        "900","901","902","903","904","905","906","908","909",
+        "910","911","912","913","914","915","916","917","918","919",
+        "920","921","922","923","924","925","926","927","928","929",
+        "930","931","932","933","934","936","937","938","939",
+        "941","942","949","950","951","952","953","954","955","958","959",
+        "960","961","962","963","964","965","966","967","968","969",
+        "970","971","977","978","979","980","981","982","983","984",
+        "985","986","987","988","989","990","991","992","993","994",
+        "995","996","997","999"
+    }
+
+    def valid_snils(s):
+        d = re.sub(r'\D', '', s)
+        if len(d) != 11 or d == "00000000000":
+            return False
+        t = sum(int(d[i]) * (9 - i) for i in range(9))
+        c = t % 101
+        if c == 100:
+            c = 0
+        return c == int(d[9:11])
+
+    def valid_inn12(s):
+        s = re.sub(r'\D', '', s)
+        if len(s) != 12:
+            return False
+        c1 = [7, 2, 4, 10, 3, 5, 9, 4, 6, 8]
+        t1 = sum(int(s[i]) * c1[i] for i in range(10)) % 11
+        if t1 == 10:
+            t1 = 0
+        if t1 != int(s[10]):
+            return False
+        c2 = [3, 7, 2, 4, 10, 3, 5, 9, 4, 6, 8]
+        t2 = sum(int(s[i]) * c2[i] for i in range(11)) % 11
+        if t2 == 10:
+            t2 = 0
+        return t2 == int(s[11])
+
+    def valid_phone(s):
+        d = re.sub(r'\D', '', s)
+        if len(d) != 11 or d[0] not in '78':
+            return False
+        return d[1:4] in VALID_OPERATOR_CODES
+
+    def valid_luhn(s):
+        d = re.sub(r'[\s\-]', '', s)
+        if not d.isdigit() or len(d) != 16 or d[0] not in '2456':
+            return False
+        t = 0
+        for i, ch in enumerate(d):
+            n = int(ch)
+            if i % 2 == 0:
+                n *= 2
+                if n > 9:
+                    n -= 9
+            t += n
+        return t % 10 == 0
+
+    def personal_email(s):
+        local = s.split('@')[0].lower()
+        bad = {"info", "admin", "support", "noreply", "no-reply", "help",
+               "contact", "office", "mail", "sales", "pr", "hr", "secretary",
+               "webmaster", "postmaster", "marketing", "service", "feedback",
+               "press", "news", "robot", "bot", "auto", "system", "root"}
+        return local not in bad and len(local) >= 3
+
+    # ========================================================================
+    # 2. ЯКОРНЫЕ ПАТТЕРНЫ (высокая точность, без сомнений = ПДн)
+    # ========================================================================
+    ANCHOR_PATTERNS = {
+        "СНИЛС": (r"\b\d{3}-\d{3}-\d{3}\s?\d{2}\b", valid_snils),
+        "Паспорт": (
+            r"(?:паспорт|серия)\s*[:\s]*\d{2}\s*\d{2}\s*(?:№|номер)?\s*\d{6}",
+            None
+        ),
+        "Банковская карта": (r"\b(?:\d{4}[\s\-]){3}\d{4}\b", valid_luhn),
+        "Биометрия: лицо": (r"\[БИОМЕТРИЯ[^\]]*лицо", None),
+        "Биометрия: глаза": (r"\[БИОМЕТРИЯ[^\]]*глаза", None),
+        "Биометрия: силуэт": (r"\[БИОМЕТРИЯ[^\]]*силуэт", None),
+        "Биометрия: подпись": (r"\[БИОМЕТРИЯ[^\]]*подпись", None),
+        "Биометрия: отпечаток": (r"\[БИОМЕТРИЯ[^\]]*отпечаток", None),
+        "Биометрия: голос": (r"\[БИОМЕТРИЯ[^\]]*голос", None),
+        "MRZ": (r"(?:P<|I<|V<|AC)[A-Z<]{2}[A-Z<]{1,39}<<", None),
+        "Медицина": (
+            r"(?:диагноз|мкб[\-\s]?\d+|анамнез|эпикриз)\s*[:\-]?\s*[А-Яа-я]",
+            None
+        ),
+        "Согласие_ПДн": (
+            r"согласие\s+на\s+обработку\s+персональных",
+            None
+        ),
     }
 
     # ========================================================================
-    # 3. ФУНКЦИИ ВАЛИДАЦИИ (Место рождения удалено, остальное без изменений)
+    # 3. ДЕТАЛЬНЫЕ ПАТТЕРНЫ (для определения ТИПОВ ПДн в кандидатах)
     # ========================================================================
-    def is_valid_snils(snils_str: str) -> bool:
-        digits = re.sub(r'\D', '', snils_str)
-        if len(digits) != 11 or digits == "00000000000":
-            return False
-        total = sum(int(digits[i]) * (9 - i) for i in range(9))
-        check = total % 101
-        if check == 100:
-            check = 0
-        return check == int(digits[9:])
-        
-    def is_valid_inn(inn_str: str) -> bool:
-        if not inn_str.isdigit():
-            return False
-        inn_len = len(inn_str)
-        if inn_len == 10:
-            coeffs = [2, 4, 10, 3, 5, 9, 4, 6, 8]
-            total = sum(int(inn_str[i]) * coeffs[i] for i in range(9))
-            check = total % 11
-            if check == 10:
-                check = 0
-            return check == int(inn_str[9])
-        elif inn_len == 12:
-            coeffs1 = [7, 2, 4, 10, 3, 5, 9, 4, 6, 8]
-            total1 = sum(int(inn_str[i]) * coeffs1[i] for i in range(10))
-            check1 = total1 % 11
-            if check1 == 10:
-                check1 = 0
-            if check1 != int(inn_str[10]):
-                return False
-            coeffs2 = [3, 7, 2, 4, 10, 3, 5, 9, 4, 6, 8]
-            total2 = sum(int(inn_str[i]) * coeffs2[i] for i in range(11))
-            check2 = total2 % 11
-            if check2 == 10:
-                check2 = 0
-            return check2 == int(inn_str[11])
-        return False
-        
-    def is_valid_phone(phone_str: str) -> bool:
-        digits = re.sub(r'\D', '', phone_str)
-        if len(digits) != 11:
-            return False
-        if digits[0] not in ['7', '8']:
-            return False
-        operator_code = digits[1:4]
-        return operator_code in VALID_OPERATOR_CODES
-        
-    def is_valid_driver_license(license_str: str) -> bool:
-        VALID_LETTERS = set("АВЕКМНОРСТУХ")
-        if len(license_str) != 8:
-            return False
-        for i in range(2):
-            if license_str[i] not in VALID_LETTERS:
-                return False
-        if not license_str[2:].isdigit():
-            return False
-        return True
-        
-    def is_valid_mrz(mrz_str: str) -> bool:
-        mrz_clean = mrz_str.replace(' ', '').replace('\n', '').replace('\r', '')
-        if len(mrz_clean) not in [44, 88]:
-            return False
-        if not re.match(r'^[A-Z0-9<]+$', mrz_clean):
-            return False
-        return True
-        
-    def is_valid_card_number(card_str: str) -> bool:
-        digits = re.sub(r'[\s-]', '', card_str)
-        if not digits.isdigit() or len(digits) != 16:
-            return False
-        total = 0
-        for i, digit in enumerate(digits):
-            num = int(digit)
-            if i % 2 == 0:
-                num *= 2
-                if num > 9:
-                    num -= 9
-            total += num
-        return total % 10 == 0
-        
-    def is_valid_bic(bic_str: str) -> bool:
-        if not bic_str.isdigit() or len(bic_str) != 9:
-            return False
-        if not bic_str.startswith('04'):
-            return False
-        return bic_str in seek_danger.VALID_BICS
-        
-    def is_valid_bank_account(account_str: str, bic_str: str = None) -> tuple:
-        digits = re.sub(r'\D', '', account_str)
-        if len(digits) != 20:
-            return (False, "не 20 цифр")
-        if bic_str and bic_str in seek_danger.VALID_BICS:
-            bank_code = bic_str[-3:]
-            check_string = bank_code + digits
-            weights = [7, 1, 3, 7, 1, 3, 7, 1, 3, 7, 1, 3, 7, 1, 3, 7, 1, 3, 7, 1, 7, 1, 3]
-            total = 0
-            for i, digit in enumerate(check_string):
-                total += int(digit) * weights[i]
-            if total % 10 == 0:
-                return (True, "OK")
-            else:
-                return (False, "контрольная сумма не совпадает")
-        return (False, "нет БИК для проверки")
-        
-    def is_valid_date(date_str: str) -> tuple:
-        date_formats = [
-            r'(\d{2})\.(\d{2})\.(\d{4})',
-            r'(\d{2})/(\d{2})/(\d{4})',
-            r'(\d{2})-(\d{2})-(\d{4})',
-        ]
-        day, month, year = None, None, None
-        parsed = False
-        for fmt in date_formats:
-            match = re.search(fmt, date_str)
-            if match:
-                day = int(match.group(1))
-                month = int(match.group(2))
-                year = int(match.group(3))
-                parsed = True
-                break
-        if not parsed:
-            match = re.search(r'(\d{2})(\d{2})(\d{4})', date_str)
-            if match:
-                day = int(match.group(1))
-                month = int(match.group(2))
-                year = int(match.group(3))
-                parsed = True
-        if not parsed:
-            return (False, "неверный формат даты")
-        try:
-            datetime.date(year, month, day)
-        except ValueError:
-            return (False, "несуществующая дата")
-        if year < 1900 or year > 2025:
-            return (False, "год вне диапазона")
-        return (True, "OK")
-        
-    def is_valid_cvv(cvv_str: str) -> bool:
-        digits = re.sub(r'\D', '', cvv_str)
-        return len(digits) == 3 and digits.isdigit()
-        
-    def is_valid_oms_policy(policy_str: str) -> bool:
-        digits = re.sub(r'\D', '', policy_str)
-        if len(digits) != 16:
-            return False
-        weights = [1, 3, 1, 3, 1, 3, 1, 3, 1, 3, 1, 3, 1, 3, 1, 3]
-        total = 0
-        for i, digit in enumerate(digits):
-            total += int(digit) * weights[i]
-        return total % 10 == 0
-        
-    def is_valid_race(race_str: str) -> bool:
-        return race_str.lower().strip() in RACE_VALUES
-        
-    def is_valid_nationality(nationality_str: str) -> bool:
-        return nationality_str.lower().strip() in NATIONALITIES
-        
-    def is_valid_religion(religion_str: str) -> bool:
-        return religion_str.lower().strip() in RELIGIONS
-        
-    def is_valid_political_view(view_str: str) -> bool:
-        return view_str.lower().strip() in POLITICAL_VIEWS
+    DETAIL_PATTERNS = {
+        "СНИЛС": (r"\b\d{3}-\d{3}-\d{3}\s?\d{2}\b", valid_snils),
+        "Паспорт": (
+            r"(?:паспорт|серия)\s*[:\s]*\d{2}\s*\d{2}\s*(?:№|номер)?\s*\d{6}",
+            None
+        ),
+        "Телефон": (
+            r"(?:\+7|8)[\s\(-]?\d{3}[\s\)-]?\d{3}[\s-]?\d{2}[\s-]?\d{2}",
+            valid_phone
+        ),
+        "Email": (
+            r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,6}",
+            personal_email
+        ),
+        "ИНН": (r"\b\d{12}\b", valid_inn12),
+        "Банковская карта": (r"\b(?:\d{4}[\s\-]){3}\d{4}\b", valid_luhn),
+        "ФИО": (
+            r"[А-ЯЁ][а-яё]{1,30}\s+[А-ЯЁ][а-яё]{1,30}\s+"
+            r"[А-ЯЁ][а-яё]{1,30}(?:вич|вна|ич|ична|инична|евич|евна|ович)",
+            None
+        ),
+        "ФИО_инициалы": (
+            r"[А-ЯЁ][а-яё]{2,30}\s+[А-ЯЁ]\.\s*[А-ЯЁ]\.",
+            None
+        ),
+        "Дата рождения": (
+            r"(?:дата\s+рожд[а-яё]*|родил(?:ся|ась)|д\.?\s*р\.?\s*:|г\.?\s*р\.?)"
+            r"\s*[:\-—\s]{0,5}\d{1,2}[.\-/]\d{1,2}[.\-/]\d{2,4}",
+            None
+        ),
+        "Адрес": (
+            r"(?:адрес\s+(?:регистрации|проживания|прописки|места\s+жительства)|"
+            r"зарегистрирован[а]?\s+по\s+адресу|проживает\s+по\s+адресу)",
+            None
+        ),
+        "Заработная плата": (
+            r"(?:зарплата|оклад|заработная\s+плата|з/?п)\s*[:\-]?\s*\d[\d\s]*"
+            r"(?:руб|₽|р\.)",
+            None
+        ),
+        "Медицина": (
+            r"(?:диагноз|мкб[\-\s]?\d+|анамнез|эпикриз|медицинская\s+карта|"
+            r"история\s+болезни)\s*[:\-]?\s*[А-Яа-я]",
+            None
+        ),
+        "Полис ОМС": (
+            r"(?:полис\s+омс|омс)\s*[:\-]?\s*\d{16}",
+            None
+        ),
+        "Водительское удостоверение": (
+            r"\b[АВЕКМНОРСТУХ]{2}\s?\d{6}\b",
+            None
+        ),
+        "Национальность": (
+            r"(?:национальность|национальная\s+принадлежность)\s*[:\-]",
+            None
+        ),
+        "Религиозные убеждения": (
+            r"(?:религия|вероисповедание)\s*[:\-]",
+            None
+        ),
+        "Политические убеждения": (
+            r"(?:политические\s+убеждения|партийная\s+принадлежность)\s*[:\-]",
+            None
+        ),
+        "Судимость": (
+            r"(?:судимость|несудим)\s*[:\-]?\s*(?:есть|нет|не\s+имеется|"
+            r"имеется|отсутствует)",
+            None
+        ),
+        "CVV": (r"(?:cvv|cvc|cvv2|cvc2)\s*[:\-]?\s*\d{3}\b", None),
+        "Биометрия: лицо": (r"\[БИОМЕТРИЯ[^\]]*лицо", None),
+        "Биометрия: глаза": (r"\[БИОМЕТРИЯ[^\]]*глаза", None),
+        "Биометрия: силуэт": (r"\[БИОМЕТРИЯ[^\]]*силуэт", None),
+        "Биометрия: подпись": (r"\[БИОМЕТРИЯ[^\]]*подпись", None),
+        "Биометрия: отпечаток": (r"\[БИОМЕТРИЯ[^\]]*отпечаток", None),
+        "Биометрия: голос": (r"\[БИОМЕТРИЯ[^\]]*голос", None),
+    }
 
     # ========================================================================
-    # 4. ОСНОВНОЙ ЦИКЛ
+    # 4. ПОДГОТОВКА ТЕКСТОВ
     # ========================================================================
+    total = len(df)
+    contents = []
+    valid_indices = []     # индексы строк с реальным текстом
+    skip_indices = set()   # индексы ошибок/пустых
+
     for idx, row in df.iterrows():
-        if str(row["Содержание"]).split(" ")[0] == "Ошибка":
+        content = str(row.get("Содержание", ""))
+        if content.startswith("Ошибка") or content.strip() in ("", "nan"):
+            skip_indices.add(idx)
+            df.at[idx, "Найденные ПДн"] = "Нет никаких нарушений"
+        else:
+            contents.append(content[:5000])  # первые 5000 символов для эмбеддинга
+            valid_indices.append(idx)
+
+    if not valid_indices:
+        return df
+
+    print(f"Файлов для анализа: {len(valid_indices)}, пропущено: {len(skip_indices)}")
+
+    # ========================================================================
+    # 5. ЭТАП 1: ЯКОРНАЯ РАЗМЕТКА через regex
+    # ========================================================================
+    anchor_positive = set()   # индексы файлов — точно ПДн
+    anchor_negative = set()   # индексы файлов — точно НЕ ПДн
+    anchor_found = {}         # idx -> {тип: кол-во}
+
+    CLEAN_INDICATORS = [
+        "course syllabus", "curriculum vitae", "conference program",
+        "table of contents", "bibliography", "references",
+        "abstract:", "isbn", "doi:", "issn:", "proceedings",
+        "©", "copyright", "all rights reserved",
+        "учебный план", "рабочая программа дисциплины",
+        "список литературы", "оглавление", "содержание",
+        "тезисы докладов", "сборник трудов",
+    ]
+
+    if update_callback:
+        update_callback(current_file="Этап 1: якорная разметка",
+                       current_file_pos=0, total_files=total)
+
+    for i, idx in enumerate(valid_indices):
+        text = str(df.at[idx, "Содержание"])[:200_000]
+        text_lower = text.lower()
+        found = {}
+
+        for name, (pat, validator) in ANCHOR_PATTERNS.items():
+            for m in re.finditer(pat, text_lower, re.IGNORECASE):
+                ok = True
+                if validator:
+                    ok = validator(m.group())
+                if ok:
+                    found[name] = found.get(name, 0) + 1
+                    break
+
+        if found:
+            anchor_positive.add(idx)
+            anchor_found[idx] = found
+        else:
+            clean_score = sum(1 for ind in CLEAN_INDICATORS if ind in text_lower)
+            if clean_score >= 2 and len(text) > 200:
+                anchor_negative.add(idx)
+
+    print(f"Якоря: {len(anchor_positive)} ПДн, {len(anchor_negative)} чистых")
+
+    # ========================================================================
+    # 6. ЭТАП 2: ЭМБЕДДИНГИ
+    # ========================================================================
+    if update_callback:
+        update_callback(current_file="Этап 2: вычисление эмбеддингов",
+                       current_file_pos=1, total_files=total)
+
+    print("Вычисляем эмбеддинги...")
+    embeddings = model.encode(
+        contents,
+        batch_size=64,
+        show_progress_bar=True,
+        normalize_embeddings=True   # для cosine similarity через dot product
+    )
+    print(f"Эмбеддинги: {embeddings.shape}")
+
+    # ========================================================================
+    # 7. ЭТАП 3: СКОРИНГ ЧЕРЕЗ СХОДСТВО С ЯКОРЯМИ
+    # ========================================================================
+    if update_callback:
+        update_callback(current_file="Этап 3: скоринг по сходству",
+                       current_file_pos=2, total_files=total)
+
+    # Маппинг: позиция в contents[] -> idx в df
+    pos_to_idx = {i: idx for i, idx in enumerate(valid_indices)}
+    idx_to_pos = {idx: i for i, idx in enumerate(valid_indices)}
+
+    # Собираем эмбеддинги якорных ПДн
+    positive_positions = [idx_to_pos[idx] for idx in anchor_positive if idx in idx_to_pos]
+    negative_positions = [idx_to_pos[idx] for idx in anchor_negative if idx in idx_to_pos]
+
+    similarity_scores = np.zeros(len(contents))
+
+    if positive_positions:
+        pos_embs = embeddings[positive_positions]
+        # Средний эмбеддинг "документа с ПДн"
+        pos_centroid = pos_embs.mean(axis=0, keepdims=True)
+
+        # Косинусное сходство каждого документа с центроидом ПДн
+        sim_to_pd = cosine_similarity(embeddings, pos_centroid).flatten()
+
+        if negative_positions:
+            neg_embs = embeddings[negative_positions]
+            neg_centroid = neg_embs.mean(axis=0, keepdims=True)
+            sim_to_clean = cosine_similarity(embeddings, neg_centroid).flatten()
+            # Итоговый скор: разница
+            similarity_scores = sim_to_pd - sim_to_clean
+        else:
+            similarity_scores = sim_to_pd
+
+    print(f"Скоры сходства: min={similarity_scores.min():.3f}, "
+          f"max={similarity_scores.max():.3f}, "
+          f"mean={similarity_scores.mean():.3f}")
+
+    # ========================================================================
+    # 8. ЭТАП 4: ОПРЕДЕЛЕНИЕ КАНДИДАТОВ + ДЕТАЛЬНЫЙ REGEX
+    # ========================================================================
+    if update_callback:
+        update_callback(current_file="Этап 4: детальный анализ кандидатов",
+                       current_file_pos=3, total_files=total)
+
+    # Порог сходства: адаптивный
+    if positive_positions:
+        pos_scores = similarity_scores[positive_positions]
+        # Порог = среднее якорных - 1.5 стандартных отклонения
+        threshold = pos_scores.mean() - 1.5 * max(pos_scores.std(), 0.05)
+        threshold = max(threshold, 0.05)  # не ниже 0.05
+    else:
+        threshold = 0.1
+
+    print(f"Порог сходства: {threshold:.3f}")
+
+    candidates = set()
+    for pos in range(len(contents)):
+        idx = pos_to_idx[pos]
+        if idx in anchor_positive:
+            candidates.add(idx)
+        elif similarity_scores[pos] >= threshold:
+            candidates.add(idx)
+
+    print(f"Кандидатов для детального анализа: {len(candidates)}")
+
+    # Детальный regex для кандидатов
+    for pos, idx in enumerate(valid_indices):
+        if update_callback and pos % 100 == 0:
+            update_callback(current_file=f"Детализация: {pos}/{len(valid_indices)}",
+                           current_file_pos=pos, total_files=len(valid_indices))
+
+        if idx not in candidates:
             df.at[idx, "Найденные ПДн"] = "Нет никаких нарушений"
             continue
-            
-        info = str(row["Содержание"])
-        info_lower = info.lower()
+
+        text = str(df.at[idx, "Содержание"])[:200_000]
+        text_lower = text.lower()
         pd_count = defaultdict(int)
-        
-        # Предварительный поиск всех БИК в тексте
-        found_bics = []
-        for match in re.finditer(r'\b\d{9}\b', info):
-            bic_candidate = match.group()
-            if is_valid_bic(bic_candidate):
-                found_bics.append({
-                    'bic': bic_candidate,
-                    'position': match.start(),
-                    'end': match.end()
-                })
-                
-        for pattern_name, pattern in patterns.items():
-            # Обновлен список категорий для поиска в нижнем регистре
-            if pattern_name in ["ФИО", "Адрес", "Заработная плата", "Медицина",
-                                "Национальность", "Раса", "Религиозные убеждения",
-                                "Политические убеждения", "Судимость", "Дата рождения", 
-                                "Паспорт", "CVV", "Полис ОМС"]:
-                text_to_search = info_lower
-            else:
-                text_to_search = info
-                
-            for match in re.finditer(pattern, text_to_search, re.IGNORECASE):
-                match_text = match.group()
-                start_pos = match.start()
-                end_pos = match.end()
-                valid = True
-                
-                # Валидация по типам
-                if pattern_name == "СНИЛС":
-                    valid = is_valid_snils(match_text)
-                elif pattern_name == "ИНН":
-                    valid = is_valid_inn(match_text)
-                elif pattern_name == "Телефон":
-                    valid = is_valid_phone(match_text)
-                elif pattern_name == "Водительское удостоверение":
-                    valid = is_valid_driver_license(match_text)
-                elif pattern_name == "MRZ":
-                    valid = is_valid_mrz(match_text)
-                elif pattern_name == "Банковская карта":
-                    valid = is_valid_card_number(match_text)
-                elif pattern_name == "БИК":
-                    valid = is_valid_bic(match_text)
-                elif pattern_name == "Банковский счет":
-                    nearby_bic = None
-                    for bic_info in found_bics:
-                        if abs(bic_info['position'] - start_pos) < 200:
-                            nearby_bic = bic_info['bic']
-                            break
-                    valid, _ = is_valid_bank_account(match_text, nearby_bic)
-                    
-                # Интеллектуальный поиск Даты Рождения с окном ±300 символов
-                elif pattern_name == "Дата рождения":
-                    is_date_valid, _ = is_valid_date(match_text)
-                    if is_date_valid:
-                        window_start = max(0, start_pos - 300)
-                        window_end = min(len(text_to_search), end_pos + 300)
-                        window_text = text_to_search[window_start:window_end]
-                        dob_keywords = ['дата рожд', 'день рожд', 'год рожд', 'родился', 'родилась', 'г.р.', 'рожд', 'уроженец', 'уроженка']
-                        
-                        if any(kw in window_text for kw in dob_keywords):
-                            valid = True
-                        else:
-                            valid = False
-                    else:
-                        valid = False
-                        
-                elif pattern_name == "CVV":
-                    valid = is_valid_cvv(match_text)
-                elif pattern_name == "Полис ОМС":
-                    valid = is_valid_oms_policy(match_text)
-                elif pattern_name == "Раса":
-                    race_match = re.search(r'([А-Яа-я]+)', match_text)
-                    valid = is_valid_race(race_match.group(1)) if race_match else False
-                elif pattern_name == "Национальность":
-                    nationality_match = re.search(r'([А-Яа-я]+)', match_text)
-                    valid = is_valid_nationality(nationality_match.group(1)) if nationality_match else False
-                elif pattern_name == "Религиозные убеждения":
-                    religion_match = re.search(r'([А-Яа-я]+)', match_text)
-                    valid = is_valid_religion(religion_match.group(1)) if religion_match else False
-                elif pattern_name == "Политические убеждения":
-                    view_match = re.search(r'([А-Яа-я]+)', match_text)
-                    valid = is_valid_political_view(view_match.group(1)) if view_match else False
-                elif pattern_name in ["ФИО", "Паспорт", "Адрес", "Заработная плата", "Медицина", "Судимость"]:
-                    valid = True
-                    
-                if valid:
-                    pd_count[pattern_name] += 1
+
+        # Если уже нашли якорные — добавляем
+        if idx in anchor_found:
+            for k, v in anchor_found[idx].items():
+                if k != "Согласие_ПДн":  # вспомогательный якорь
+                    pd_count[k] += v
+
+        # Ищем все детальные паттерны
+        for name, (pat, validator) in DETAIL_PATTERNS.items():
+            if name in pd_count:
+                continue  # уже нашли через якорь
+
+            search_text = text_lower if name in (
+                "Паспорт", "Дата рождения", "Адрес", "Заработная плата",
+                "Медицина", "Полис ОМС", "Национальность",
+                "Религиозные убеждения", "Политические убеждения",
+                "Судимость", "CVV"
+            ) else text
+
+            for m in re.finditer(pat, search_text, re.IGNORECASE):
+                ok = True
+                if validator:
+                    ok = validator(m.group())
+                if ok:
+                    real_name = "ФИО" if name == "ФИО_инициалы" else name
+                    pd_count[real_name] += 1
                     break
-                    
+
+        # --- Финальное решение ---
         if pd_count:
-            result_parts = [f"{pd_type}({count})" for pd_type, count in pd_count.items()]
-            df.at[idx, "Найденные ПДн"] = ",".join(result_parts)
+            strong = {"Паспорт", "СНИЛС", "ИНН", "Банковская карта",
+                      "Полис ОМС", "Водительское удостоверение", "MRZ",
+                      "Дата рождения", "Заработная плата", "Медицина",
+                      "Судимость", "Национальность", "Религиозные убеждения",
+                      "Политические убеждения", "CVV"}
+            bio = {k for k in pd_count if k.startswith("Биометрия")}
+            weak = {"ФИО", "Телефон", "Email", "Адрес"}
+            weak_found = {t for t in pd_count if t in weak}
+            has_strong = any(t in strong for t in pd_count)
+
+            if has_strong or bio or len(weak_found) >= 2:
+                parts = [f"{t}({c})" for t, c in pd_count.items()]
+                df.at[idx, "Найденные ПДн"] = ",".join(parts)
+            else:
+                # Слабые сигналы, но файл ОЧЕНЬ похож на якорные
+                i_pos = idx_to_pos.get(idx, -1)
+                if i_pos >= 0 and similarity_scores[i_pos] >= threshold * 1.5:
+                    parts = [f"{t}({c})" for t, c in pd_count.items()]
+                    df.at[idx, "Найденные ПДн"] = ",".join(parts)
+                else:
+                    df.at[idx, "Найденные ПДн"] = "Нет никаких нарушений"
         else:
-            df.at[idx, "Найденные ПДн"] = "Нет никаких нарушений"       
+            # Нет regex-находок, но similarity очень высокий — пометить?
+            i_pos = idx_to_pos.get(idx, -1)
+            if i_pos >= 0 and similarity_scores[i_pos] >= threshold * 2.0:
+                # Очень похож на ПДн, но regex ничего не нашёл
+                # Помечаем осторожно — только если парсинг мог пропустить
+                df.at[idx, "Найденные ПДн"] = "ПДн(1)"
+            else:
+                df.at[idx, "Найденные ПДн"] = "Нет никаких нарушений"
 
     return df
 
+
+
 def categories(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Функция принимает на вход датафрейм и по колонке "Найденные ПДн"
-    распределяет их по категориям и записывает результат в колонку "Категории".
-    """
-    
     import re
     from collections import defaultdict
-    
-    # ========================================================================
-    # 1. ОБЫЧНЫЕ ПЕРСОНАЛЬНЫЕ ДАННЫЕ
-    # ========================================================================
-    COMMON_PD = {
-        "ФИО",
-        "Телефон",
-        "Email",
-        "Дата рождения",
-        "Адрес",
+
+    PD_TO_CATEGORY = {
+        "ФИО": "Обычные персональные данные",
+        "Телефон": "Обычные персональные данные",
+        "Email": "Обычные персональные данные",
+        "Дата рождения": "Обычные персональные данные",
+        "Адрес": "Обычные персональные данные",
+        "Паспорт": "Государственные идентификаторы",
+        "СНИЛС": "Государственные идентификаторы",
+        "ИНН": "Государственные идентификаторы",
+        "Водительское удостоверение": "Государственные идентификаторы",
+        "MRZ": "Государственные идентификаторы",
+        "Полис ОМС": "Государственные идентификаторы",
+        "Банковская карта": "Платежная информация",
+        "Банковский счет": "Платежная информация",
+        "БИК": "Платежная информация",
+        "CVV": "Платежная информация",
+        "Биометрия: лицо": "Биометрические данные",
+        "Биометрия: глаза": "Биометрические данные",
+        "Биометрия: силуэт": "Биометрические данные",
+        "Биометрия: подпись": "Биометрические данные",
+        "Биометрия: отпечаток": "Биометрические данные",
+        "Биометрия: голос": "Биометрические данные",
+        "Медицина": "Специальные категории ПДн",
+        "Национальность": "Специальные категории ПДн",
+        "Раса": "Специальные категории ПДн",
+        "Религиозные убеждения": "Специальные категории ПДн",
+        "Политические убеждения": "Специальные категории ПДн",
+        "Судимость": "Специальные категории ПДн",
+        "Заработная плата": "Финансовые данные",
     }
-    
-    # ========================================================================
-    # 2. ГОСУДАРСТВЕННЫЕ ИДЕНТИФИКАТОРЫ
-    # ========================================================================
-    GOV_ID = {
-        "Паспорт",
-        "СНИЛС",
-        "ИНН",
-        "Водительское удостоверение",
-        "MRZ",
-        "Полис ОМС",
-    }
-    
-    # ========================================================================
-    # 3. ПЛАТЕЖНАЯ ИНФОРМАЦИЯ
-    # ========================================================================
-    PAYMENT_INFO = {
-        "Банковская карта",
-        "Банковский счет",
-        "БИК",
-        "CVV",
-    }
-    
-    # ========================================================================
-    # 4. БИОМЕТРИЧЕСКИЕ ДАННЫЕ
-    # ========================================================================
-    BIOMETRIC_DATA = {
-        "Биометрия: лицо",
-        "Биометрия: глаза",
-        "Биометрия: силуэт",
-        "Биометрия: подпись",
-        "Биометрия: отпечаток",
-        "Биометрия: голос",
-    }
-    
-    # ========================================================================
-    # 5. СПЕЦИАЛЬНЫЕ КАТЕГОРИИ ПДн
-    # ========================================================================
-    SPECIAL_CATEGORIES = {
-        "Медицина",
-        "Национальность",
-        "Раса",
-        "Религиозные убеждения",
-        "Политические убеждения",
-        "Судимость",
-    }
-    
-    # ========================================================================
-    # 6. ФИНАНСОВЫЕ ДАННЫЕ
-    # ========================================================================
-    FINANCIAL_DATA = {
-        "Заработная плата",
-    }
-    
-    # ========================================================================
-    # 7. МАППИНГ: тип ПДн -> категория
-    # ========================================================================
-    PD_TO_CATEGORY = {}
-    
-    for pd_type in COMMON_PD:
-        PD_TO_CATEGORY[pd_type] = "Обычные персональные данные"
-    
-    for pd_type in GOV_ID:
-        PD_TO_CATEGORY[pd_type] = "Государственные идентификаторы"
-    
-    for pd_type in PAYMENT_INFO:
-        PD_TO_CATEGORY[pd_type] = "Платежная информация"
-    
-    for pd_type in BIOMETRIC_DATA:
-        PD_TO_CATEGORY[pd_type] = "Биометрические данные"
-    
-    for pd_type in SPECIAL_CATEGORIES:
-        PD_TO_CATEGORY[pd_type] = "Специальные категории ПДн"
-    
-    for pd_type in FINANCIAL_DATA:
-        PD_TO_CATEGORY[pd_type] = "Финансовые данные"
-    
-    # ========================================================================
-    # 8. ОСНОВНОЙ ЦИКЛ
-    # ========================================================================
+
     for idx, row in df.iterrows():
-        found_pdns_str = row["Найденные ПДн"]
-        
-        if found_pdns_str == "Нет никаких нарушений":
+        found_pdns_str = str(row.get("Найденные ПДн", ""))
+
+        if found_pdns_str == "Нет никаких нарушений" or not found_pdns_str:
             df.at[idx, "Категории"] = "Нет нарушений"
             continue
-        
+
         category_counts = defaultdict(int)
-        
+
         for item in found_pdns_str.split(","):
             item = item.strip()
             if not item:
                 continue
-            
-            # ИСПРАВЛЕНО: добавлены латинские буквы A-Za-z
-            match = re.match(r'^([A-Za-zА-Яа-я\s:]+)\((\d+)\)$', item)
-            if match:
-                pd_type = match.group(1).strip()
-                count = int(match.group(2))
-                
-                category = PD_TO_CATEGORY.get(pd_type)
-                if category:
-                    category_counts[category] += count
-                else:
-                    # Пробуем найти без учёта регистра
-                    pd_type_lower = pd_type.lower()
-                    found = False
-                    for key in PD_TO_CATEGORY.keys():
-                        if key.lower() == pd_type_lower:
-                            category = PD_TO_CATEGORY[key]
-                            category_counts[category] += count
-                            found = True
+            m = re.match(r'^([A-Za-zА-Яа-яЁё\s:]+)\((\d+)\)$', item)
+            if m:
+                pd_type = m.group(1).strip()
+                count = int(m.group(2))
+                cat = PD_TO_CATEGORY.get(pd_type)
+                if not cat:
+                    for key, val in PD_TO_CATEGORY.items():
+                        if key.lower() == pd_type.lower():
+                            cat = val
                             break
-                    
-                    if not found:
-                        category_counts["Неизвестная категория"] += count
-        
+                if cat:
+                    category_counts[cat] += count
+                else:
+                    category_counts["Неизвестная категория"] += count
+
         if category_counts:
-            result_parts = [f"{category}({count})" for category, count in sorted(category_counts.items())]
-            df.at[idx, "Категории"] = ",".join(result_parts)
+            parts = [f"{c}({n})" for c, n in sorted(category_counts.items())]
+            df.at[idx, "Категории"] = ",".join(parts)
         else:
             df.at[idx, "Категории"] = "Неизвестная категория"
-    
+
     return df
+
+
 
 def evaluate_violations(df: pd.DataFrame) -> pd.DataFrame:
     """
